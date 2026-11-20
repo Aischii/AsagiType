@@ -34,6 +34,19 @@ pub fn apply(ctx: &egui::Context) {
             .or_default()
             .insert(0, "tahoma".into());
     }
+    // Japanese fallback so OCR text and glossaries render instead of empty boxes.
+    // The first Windows font found wins; .ttc collections use face 0.
+    for file in ["YuGothM.ttc", "meiryo.ttc", "BIZ-UDGothicR.ttc", "NotoSansJP-VF.ttf", "msgothic.ttc"] {
+        if let Ok(bytes) = std::fs::read(format!("C:/Windows/Fonts/{file}")) {
+            fonts
+                .font_data
+                .insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push("cjk".into());
+            }
+            break;
+        }
+    }
     ctx.set_fonts(fonts);
 
     let mut style = (*ctx.global_style()).clone();
