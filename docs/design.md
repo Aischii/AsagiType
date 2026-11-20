@@ -70,6 +70,8 @@ crates/vision       (stage 1) candle detection, OCR and cleaning
 
 ## Roadmap
 
+The detailed plan after the demo review is in [roadmap.md](roadmap.md). The original outline follows.
+
 1. **Skeleton (this session):** window and theme. Import a chapter from a folder or the workspace. Open and save `.at2k`. Draw balloons by hand and type the source text. Translate a page. Render the lettering. About and credits.
 2. Candle detection and OCR. Solid-fill cleaning. Weights release `models-v1`.
 3. JPG, CBZ and layered PSD export. Glossary editor. QC checks.
