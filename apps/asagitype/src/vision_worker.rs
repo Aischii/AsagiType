@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 use vision::{
-    clean::{clean_page_full, CleanBox},
+    clean::{clean_page_with_balloons, CleanBox},
     Models, TextRegion,
 };
 
@@ -57,8 +57,45 @@ pub struct VisionWorker {
 
 const THRESHOLD: f32 = 0.5;
 
+/// Balloon segmenter (loaded once, if the user supplied it) and masks per page image.
+#[derive(Default)]
+struct Segments {
+    model: Option<Option<vision::bubbles::BubbleSegmenter>>,
+    cache: std::collections::HashMap<u64, Vec<vision::bubbles::Balloon>>,
+}
+
+impl Segments {
+    fn balloons(
+        &mut self,
+        dir: &std::path::Path,
+        bytes: &[u8],
+        img: &image::RgbImage,
+    ) -> Vec<vision::bubbles::Balloon> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        let key = h.finish();
+        if let Some(b) = self.cache.get(&key) {
+            return b.clone();
+        }
+        let model = self
+            .model
+            .get_or_insert_with(|| vision::load_segmenter(dir));
+        let found = model
+            .as_ref()
+            .and_then(|m| m.segment(img).ok())
+            .unwrap_or_default();
+        if self.cache.len() > 16 {
+            self.cache.clear();
+        }
+        self.cache.insert(key, found.clone());
+        found
+    }
+}
+
 fn run(
     models: &mut Option<Models>,
+    segments: &mut Segments,
     dir: &std::path::Path,
     req: Request,
 ) -> (usize, Result<Outcome, String>) {
@@ -95,7 +132,8 @@ fn run(
                 let img = image::load_from_memory(&bytes)
                     .map_err(|e| e.to_string())?
                     .to_rgb8();
-                let res = clean_page_full(&img, &boxes);
+                let balloons = segments.balloons(dir, &bytes, &img);
+                let res = clean_page_with_balloons(&img, &boxes, &balloons);
                 let touch_up = ids
                     .iter()
                     .zip(&res.touch_up)
@@ -123,8 +161,9 @@ impl VisionWorker {
             .name("asagitype-vision".into())
             .spawn(move || {
                 let mut models: Option<Models> = None;
+                let mut segments = Segments::default();
                 for req in req_rx {
-                    let (page, result) = run(&mut models, &dir, req);
+                    let (page, result) = run(&mut models, &mut segments, &dir, req);
                     let _ = res_tx.send(PageResult { page, result });
                     ctx.request_repaint();
                 }

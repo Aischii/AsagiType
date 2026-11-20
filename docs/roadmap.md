@@ -59,7 +59,7 @@ Each change below comes with a test, and v1 files must still open.
 - The Auto button with This page / All pages scope, a progress dialog and Cancel.
 - The Ignore flag.
 
-### 0.5: live cleaning, content-aware fill and rotation
+### 0.5: live cleaning, content-aware fill and rotation (done)
 
 Decided on 2026-11-20 after the owner tested 0.4. The owner found three problems:
 

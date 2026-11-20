@@ -4,7 +4,7 @@ AsagiType 2000 is a manga scanlation editor written in pure Rust, with a boxy Wi
 
 It runs as one native Windows app, built on egui/eframe and wgpu, like [PhotoCraft](https://github.com/storytold/photocraft). It needs no web view and no Python.
 
-## Status: v0.4
+## Status: v0.5
 
 **Working:**
 - Import a chapter, either from a folder of pages or from a scanlation workspace (`series/<S>/chapters/<C>/source`), into a self-contained `.at2k` project.
@@ -30,6 +30,8 @@ cargo run --release -p asagitype
 ```
 
 You need Rust 1.85 or newer on Windows 10 or 11. Comic fonts are loaded from the folder set in Tools > Settings.
+
+Optional: `manga109-segmentation-bubble/model.safetensors` gives exact balloon masks for cleaning. It is never bundled, because it was trained on the academic-use Manga109 dataset.
 
 Until the weights release exists, set Tools > Settings > Models folder to a folder that holds:
 

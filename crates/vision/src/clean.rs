@@ -113,6 +113,16 @@ pub fn clean_page(img: &RgbImage, boxes: &[CleanBox]) -> RgbaImage {
 }
 
 pub fn clean_page_full(img: &RgbImage, boxes: &[CleanBox]) -> CleanResult {
+    clean_page_with_balloons(img, boxes, &[])
+}
+
+/// Like [`clean_page_full`], with balloon masks from the segmentation model: text inside a
+/// segmented balloon is erased only within the balloon interior, so outlines stay.
+pub fn clean_page_with_balloons(
+    img: &RgbImage,
+    boxes: &[CleanBox],
+    balloons: &[crate::bubbles::Balloon],
+) -> CleanResult {
     let mut res = CleanResult {
         layer: RgbaImage::new(img.width(), img.height()),
         mask: GrayImage::new(img.width(), img.height()),
@@ -125,12 +135,101 @@ pub fn clean_page_full(img: &RgbImage, boxes: &[CleanBox]) -> CleanResult {
                 paint_shape(b.text_box, &style, &mut res.layer, &mut res.mask);
                 (false, FillMethod::Shape)
             }
-            None => clean_auto(img, b, &mut res.layer, &mut res.mask),
+            None => match balloon_for(&b.text_box, balloons) {
+                Some(bal) => clean_in_balloon(img, b, bal, &mut res.layer, &mut res.mask)
+                    .unwrap_or_else(|| clean_auto(img, b, &mut res.layer, &mut res.mask)),
+                _ => clean_auto(img, b, &mut res.layer, &mut res.mask),
+            },
         };
         res.touch_up.push(touch);
         res.methods.push(method);
     }
     res
+}
+
+/// Pixels shaved off the balloon mask so the outline is never painted.
+const OUTLINE_GUARD: i32 = 3;
+
+/// The segmented balloon covering most of the text box (at least 60%).
+fn balloon_for<'a>(
+    t: &[i32; 4],
+    balloons: &'a [crate::bubbles::Balloon],
+) -> Option<&'a crate::bubbles::Balloon> {
+    let area = ((t[2] - t[0]).max(1) * (t[3] - t[1]).max(1)) as f32;
+    balloons
+        .iter()
+        .map(|b| {
+            let mut n = 0usize;
+            for y in (t[1]..t[3]).step_by(2) {
+                for x in (t[0]..t[2]).step_by(2) {
+                    if b.contains(x, y) {
+                        n += 1;
+                    }
+                }
+            }
+            (n as f32 * 4.0 / area, b)
+        })
+        .filter(|(f, _)| *f >= 0.6)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, b)| b)
+}
+
+/// Fill the text box (plus margin) inside the balloon interior with the balloon colour.
+/// None when the interior is not plain (screentone, gradients): the general method runs.
+fn clean_in_balloon(
+    img: &RgbImage,
+    cb: &CleanBox,
+    bal: &crate::bubbles::Balloon,
+    layer: &mut RgbaImage,
+    mask_out: &mut GrayImage,
+) -> Option<(bool, FillMethod)> {
+    const MARGIN: i32 = 6;
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let t = clamp_box(cb.text_box, w, h);
+    let fill = clamp_box(grow(t, MARGIN), w, h);
+    // Interior = mask eroded by OUTLINE_GUARD.
+    let interior = |x: i32, y: i32| {
+        (-OUTLINE_GUARD..=OUTLINE_GUARD)
+            .all(|dy| (-OUTLINE_GUARD..=OUTLINE_GUARD).all(|dx| bal.contains(x + dx, y + dy)))
+    };
+    // Background colour: the light tone of the interior inside the box.
+    let mut lums = vec![];
+    for y in t[1]..t[3] {
+        for x in t[0]..t[2] {
+            if interior(x, y) {
+                lums.push(lum(img.get_pixel(x as u32, y as u32)));
+            }
+        }
+    }
+    if lums.len() < 20 {
+        return None;
+    }
+    lums.sort_by(f32::total_cmp);
+    let bg = lums[lums.len() * 9 / 10];
+    let light: Vec<f32> = lums.iter().copied().filter(|&l| l >= bg - 40.0).collect();
+    let mean = light.iter().sum::<f32>() / light.len() as f32;
+    let std = (light.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / light.len() as f32).sqrt();
+    if bg < 120.0 || std > 12.0 {
+        return None;
+    }
+    let colour = cb.fill.unwrap_or_else(|| {
+        median_colour(img, &t, |x, y| {
+            interior(x, y) && lum(img.get_pixel(x as u32, y as u32)) >= bg - 40.0
+        })
+    });
+    for y in fill[1]..fill[3] {
+        for x in fill[0]..fill[2] {
+            if interior(x, y) {
+                layer.put_pixel(
+                    x as u32,
+                    y as u32,
+                    Rgba([colour[0], colour[1], colour[2], 255]),
+                );
+                mask_out.put_pixel(x as u32, y as u32, Luma([255]));
+            }
+        }
+    }
+    Some((false, FillMethod::Solid))
 }
 
 /// Otsu threshold over luminance values.
@@ -1565,5 +1664,53 @@ mod tests {
         assert_eq!(layer.get_pixel(60, 40).0, [255, 255, 255, 255]);
         assert_eq!(layer.get_pixel(0, 0)[3], 0);
         assert!((0..60).any(|x| layer.get_pixel(x, 40).0 == [0, 0, 0, 255]));
+    }
+}
+
+#[cfg(test)]
+mod balloon_tests {
+    use super::*;
+    use crate::bubbles::Balloon;
+
+    #[test]
+    fn letter_touching_outline_is_erased_inside_the_balloon_only() {
+        // White disc bubble with a 4 px outline; a letter bar fused to the right outline.
+        let mut img = RgbImage::from_pixel(200, 200, Rgb([150, 150, 150]));
+        let inside = |x: i32, y: i32| ((x - 100).pow(2) + (y - 100).pow(2)) as f32;
+        for y in 0..200 {
+            for x in 0..200 {
+                let d = inside(x, y).sqrt();
+                if d <= 70.0 {
+                    img.put_pixel(x as u32, y as u32, Rgb([255, 255, 255]));
+                }
+                if (66.0..=70.0).contains(&d) {
+                    img.put_pixel(x as u32, y as u32, Rgb([0, 0, 0]));
+                }
+            }
+        }
+        for y in 96..104 {
+            for x in 120..168 {
+                img.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        let mask = GrayImage::from_fn(140, 140, |x, y| {
+            let d = inside(x as i32 + 30, y as i32 + 30).sqrt();
+            image::Luma([if d <= 70.0 { 255 } else { 0 }])
+        });
+        let bal = Balloon {
+            bbox: [30, 30, 170, 170],
+            score: 0.9,
+            mask,
+        };
+        let r =
+            clean_page_with_balloons(&img, &[CleanBox::auto([110, 90, 172, 110], None)], &[bal]);
+        let out = composite(&img, &r.layer);
+        assert_eq!(out.get_pixel(140, 100).0, [255, 255, 255], "letter erased");
+        assert_eq!(out.get_pixel(168, 100).0, [0, 0, 0], "outline kept");
+        assert_eq!(
+            out.get_pixel(185, 100).0,
+            [150, 150, 150],
+            "outside untouched"
+        );
     }
 }

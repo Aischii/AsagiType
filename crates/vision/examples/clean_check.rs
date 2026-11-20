@@ -1,7 +1,7 @@
 //! Detect, then clean a page and write the result.
 //! Usage: clean_check <models dir> <image> <out.png>
 use std::path::PathBuf;
-use vision::clean::{clean_page_full, composite, CleanBox};
+use vision::clean::{clean_page_with_balloons, composite, CleanBox};
 
 fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
@@ -12,8 +12,19 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|r| CleanBox::auto(r.text_box, r.bubble))
         .collect();
+    let seg = vision::load_segmenter(&PathBuf::from(&a[1]));
+    let ts = std::time::Instant::now();
+    let balloons = seg
+        .map(|s| s.segment(&img.to_rgb8()))
+        .transpose()?
+        .unwrap_or_default();
+    println!(
+        "segmented {} balloons in {} ms",
+        balloons.len(),
+        ts.elapsed().as_millis()
+    );
     let t = std::time::Instant::now();
-    let res = clean_page_full(&img.to_rgb8(), &boxes);
+    let res = clean_page_with_balloons(&img.to_rgb8(), &boxes, &balloons);
     println!(
         "cleaned {} boxes in {} ms",
         boxes.len(),

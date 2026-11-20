@@ -27,12 +27,13 @@ Weights are published as release assets and downloaded on first run. They are ne
 | --- | --- | --- | --- |
 | [comic-text-and-bubble-detector](https://huggingface.co/ogkalu/comic-text-and-bubble-detector) (RT-DETR v2) | ogkalu | Apache-2.0 | Detecting balloons and text |
 | [manga-ocr](https://github.com/kha-white/manga-ocr) | Maciej Budyś (kha-white) | Apache-2.0 | Japanese OCR |
+| [manga109-segmentation-bubble](https://huggingface.co/huyvux3005/manga109-segmentation-bubble) (YOLO11n-seg) | huyvux3005 | Apache-2.0 weights, trained on Manga109 (academic use) | Balloon masks for cleaning. Not distributed: put it in your models folder. The YOLO11 network is reimplemented in candle; no Ultralytics code is used |
 | [LaMa](https://github.com/advimman/lama) | Suvorov et al., Samsung AI Center | Apache-2.0 | Planned: inpainting |
 
 These were left out for licence reasons:
 
 - YOLO26 comic-layout: Ultralytics, AGPL-3.0.
-- The Manga109 bubble segmenter: trained on the non-commercial Manga109 dataset.
+- The Manga109 bubble segmenter is not bundled or released. It was trained on the academic-use Manga109 dataset, so the app only uses a copy you supply yourself.
 
 ## Fonts
 

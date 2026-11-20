@@ -56,6 +56,7 @@ pub const SECTIONS: &[Section] = &[
         items: &[
             c("comic-text-and-bubble-detector (RT-DETR v2)", "ogkalu", "Apache-2.0", "https://huggingface.co/ogkalu/comic-text-and-bubble-detector", "balloon and text detection"),
             c("manga-ocr", "Maciej Budys (kha-white)", "Apache-2.0", "https://github.com/kha-white/manga-ocr", "Japanese OCR"),
+            c("manga109-segmentation-bubble (YOLO11n-seg)", "huyvux3005; network reimplemented in candle", "Apache-2.0 weights, trained on Manga109 (academic use)", "https://huggingface.co/huyvux3005/manga109-segmentation-bubble", "balloon masks; not distributed, you supply it"),
             c("LaMa", "Suvorov et al., Samsung AI Center", "Apache-2.0", "https://github.com/advimman/lama", "planned: inpainting"),
         ],
     },

@@ -1,5 +1,6 @@
 //! Pure-Rust (candle) vision models for AsagiType 2000.
 
+pub mod bubbles;
 pub mod clean;
 pub mod detect;
 pub mod ocr;
@@ -31,6 +32,16 @@ pub struct TextRegion {
 pub struct Models {
     pub detector: ComicDetector,
     pub ocr: MangaOcr,
+}
+
+/// Load the balloon segmenter from `models_dir/manga109-segmentation-bubble` if the user has
+/// supplied it (it is never bundled); None otherwise.
+pub fn load_segmenter(models_dir: &Path) -> Option<bubbles::BubbleSegmenter> {
+    let dir = models_dir.join("manga109-segmentation-bubble");
+    if !dir.join("model.safetensors").is_file() {
+        return None;
+    }
+    bubbles::BubbleSegmenter::load(&dir, &Device::Cpu).ok()
 }
 
 impl Models {
