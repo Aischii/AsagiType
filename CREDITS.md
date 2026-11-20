@@ -17,7 +17,7 @@ This list is shown in the app under Help > About. Keep it in sync with `apps/asa
 | [rfd](https://github.com/PolyMeilex/rfd) | Poly Meilex and contributors | MIT | File dialogs |
 | serde, serde_json, anyhow | David Tolnay and contributors | MIT OR Apache-2.0 | Data and errors |
 | imagesize, dirs | Their authors | MIT / MIT OR Apache-2.0 | Utilities |
-| [candle](https://github.com/huggingface/candle) | Hugging Face | MIT OR Apache-2.0 | Planned: ML runtime |
+| [candle](https://github.com/huggingface/candle) | Hugging Face | MIT OR Apache-2.0 | ML runtime (detection, OCR) |
 
 ## Models
 
@@ -25,8 +25,8 @@ Weights are published as release assets and downloaded on first run. They are ne
 
 | Model | Author | Licence | Used for |
 | --- | --- | --- | --- |
-| comic-speech-bubble-detector (RT-DETR) | [ogkalu](https://huggingface.co/ogkalu) | Apache-2.0 | Planned: detecting balloons, text and SFX |
-| [manga-ocr](https://github.com/kha-white/manga-ocr) | Maciej Budyś (kha-white) | Apache-2.0 | Planned: Japanese OCR |
+| [comic-text-and-bubble-detector](https://huggingface.co/ogkalu/comic-text-and-bubble-detector) (RT-DETR v2) | ogkalu | Apache-2.0 | Detecting balloons and text |
+| [manga-ocr](https://github.com/kha-white/manga-ocr) | Maciej Budyś (kha-white) | Apache-2.0 | Japanese OCR |
 | [LaMa](https://github.com/advimman/lama) | Suvorov et al., Samsung AI Center | Apache-2.0 | Planned: inpainting |
 
 These were left out for licence reasons:

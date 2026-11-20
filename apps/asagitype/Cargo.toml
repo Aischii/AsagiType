@@ -9,6 +9,7 @@ license.workspace = true
 at2k.workspace = true
 provider.workspace = true
 render.workspace = true
+vision.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

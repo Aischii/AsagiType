@@ -10,6 +10,8 @@ pub struct Settings {
     pub workspace_root: String,
     pub projects_dir: String,
     pub fonts_dir: String,
+    /// Holds `bubble-detector/` and `manga-ocr/`.
+    pub models_dir: String,
     pub provider: ProviderConfig,
     pub target_lang: String,
     /// Lettering role -> font family.
@@ -44,6 +46,7 @@ impl Default for Settings {
                 .to_string_lossy()
                 .into_owned(),
             fonts_dir: "C:/Projects/translate/tools/fonts".into(),
+            models_dir: "C:/Projects/translate/tools/models".into(),
             provider: ProviderConfig::default(),
             target_lang: "en".into(),
             role_fonts,

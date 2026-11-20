@@ -1,0 +1,14 @@
+[package]
+name = "vision"
+description = "Pure-Rust (candle) detection and OCR for AsagiType 2000"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+candle-core = "0.11"
+candle-nn = "0.11"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

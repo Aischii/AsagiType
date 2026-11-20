@@ -1,5 +1,6 @@
 //! Main window: title bar, menus, toolbar, project/page lists, canvas, balloon panel, dialogs.
 
+use crate::vision_worker::{Request, VisionWorker};
 use crate::{
     credits,
     settings::{Settings, ROLES},
@@ -65,6 +66,7 @@ pub struct AsagiApp {
     show_boxes: bool,
     status: String,
     job: Option<TranslateJob>,
+    vision: Option<VisionWorker>,
     settings_form: SettingsForm,
     import_form: ImportForm,
     about_open: bool,
@@ -99,6 +101,7 @@ impl AsagiApp {
             show_boxes: true,
             status,
             job: None,
+            vision: None,
             settings_form: SettingsForm::default(),
             import_form: ImportForm::default(),
             about_open: false,
@@ -326,6 +329,97 @@ impl AsagiApp {
         });
     }
 
+    /// Queue detection + OCR. Pages that already have balloons are skipped unless `replace`.
+    fn detect_pages(&mut self, ctx: &egui::Context, pages: Vec<usize>, replace: bool) {
+        let (Some(path), Some(m)) = (self.path.clone(), &self.manifest) else {
+            return;
+        };
+        let dir = PathBuf::from(&self.settings.models_dir);
+        if self.vision.as_ref().is_none_or(|v| v.models_dir != dir) {
+            if self.vision.as_ref().is_some_and(|v| v.pending > 0) {
+                self.message = Some(("Wait for the current detection to finish.".into(), false));
+                return;
+            }
+            self.vision = Some(VisionWorker::spawn(dir, ctx.clone()));
+        }
+        let todo: Vec<(usize, String)> = pages
+            .into_iter()
+            .filter_map(|i| m.pages.get(i).map(|p| (i, p)))
+            .filter(|(_, p)| !p.raw_only && (replace || p.balloons.is_empty()))
+            .map(|(i, p)| (i, p.image.clone()))
+            .collect();
+        if todo.is_empty() {
+            self.status =
+                "Nothing to detect: these pages already have balloons (use Redetect to replace)."
+                    .into();
+            return;
+        }
+        let mut queued = 0;
+        for (page, image) in todo {
+            match at2k::read_entry(&path, &image) {
+                Ok(bytes) => {
+                    self.vision.as_mut().unwrap().submit(Request {
+                        page,
+                        bytes,
+                        replace,
+                    });
+                    queued += 1;
+                }
+                Err(e) => {
+                    self.error(format!("Could not read {image}:\n{e:#}"));
+                    return;
+                }
+            }
+        }
+        self.status = format!("Detecting text and running OCR on {queued} page(s)... (the first run loads the models)");
+    }
+
+    fn poll_vision(&mut self) {
+        let Some(worker) = &mut self.vision else {
+            return;
+        };
+        let results = worker.poll();
+        let pending = worker.pending;
+        for r in results {
+            match r.result {
+                Ok(regions) => {
+                    let Some(page) = self.manifest.as_mut().and_then(|m| m.pages.get_mut(r.page))
+                    else {
+                        continue;
+                    };
+                    if !r.replace && !page.balloons.is_empty() {
+                        continue;
+                    }
+                    page.balloons = regions
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, t)| Balloon {
+                            id: i as u32 + 1,
+                            kind: t.kind.into(),
+                            text_box: t.text_box,
+                            bubble: t.bubble,
+                            source_text: t.source_text,
+                            text: String::new(),
+                            role: "dialogue".into(),
+                            size: 0.0,
+                        })
+                        .collect();
+                    let msg = format!("Page {} done: {} text areas.", page.id, page.balloons.len());
+                    if r.page == self.page {
+                        self.selected = None;
+                    }
+                    self.dirty = true;
+                    self.status = if pending > 0 {
+                        format!("{msg} {pending} page(s) left...")
+                    } else {
+                        msg
+                    };
+                }
+                Err(e) => self.error(format!("Detection failed:\n{e}")),
+            }
+        }
+    }
+
     fn poll_job(&mut self) {
         let Some(job) = &self.job else { return };
         let Ok(result) = job.rx.try_recv() else {
@@ -469,6 +563,30 @@ impl AsagiApp {
                     }
                 });
                 ui.menu_button("Page", |ui| {
+                    let busy = self.vision.as_ref().is_some_and(|v| v.pending > 0);
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Detect + OCR page  (F5)"))
+                        .clicked()
+                    {
+                        self.detect_pages(ctx, vec![self.page], false);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Detect + OCR whole chapter"))
+                        .clicked()
+                    {
+                        let n = self.manifest.as_ref().map(|m| m.pages.len()).unwrap_or(0);
+                        self.detect_pages(ctx, (0..n).collect(), false);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Redetect page (replace balloons)"))
+                        .clicked()
+                    {
+                        self.detect_pages(ctx, vec![self.page], true);
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Translate page  (F6)").clicked() {
                         self.start_translate(None);
                         ui.close();
@@ -550,6 +668,22 @@ impl AsagiApp {
                 ui.selectable_value(&mut self.tool, Tool::Select, "Select");
                 ui.selectable_value(&mut self.tool, Tool::Draw, "Draw balloon");
                 ui.separator();
+                let detecting = self.vision.as_ref().map(|v| v.pending).unwrap_or(0);
+                let label = if detecting > 0 {
+                    format!("Detecting ({detecting})...")
+                } else {
+                    "Detect + OCR".to_string()
+                };
+                if ui
+                    .add_enabled(
+                        detecting == 0 && self.manifest.is_some(),
+                        egui::Button::new(label),
+                    )
+                    .clicked()
+                {
+                    let ctx = ui.ctx().clone();
+                    self.detect_pages(&ctx, vec![self.page], false);
+                }
                 let busy = self.job.is_some();
                 if ui
                     .add_enabled(
@@ -1034,6 +1168,12 @@ impl AsagiApp {
                                     .desired_width(320.0),
                             );
                             ui.end_row();
+                            ui.label("Models folder");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut d.models_dir).desired_width(320.0),
+                            )
+                            .on_hover_text("Holds bubble-detector/ and manga-ocr/");
+                            ui.end_row();
                             ui.label("Fonts folder");
                             ui.add(
                                 egui::TextEdit::singleline(&mut d.fonts_dir).desired_width(320.0),
@@ -1239,9 +1379,10 @@ impl AsagiApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
-        let (save, f6, pgdn, pgup, del, esc) = ctx.input(|i| {
+        let (save, f5, f6, pgdn, pgup, del, esc) = ctx.input(|i| {
             (
                 i.modifiers.ctrl && i.key_pressed(Key::S),
+                i.key_pressed(Key::F5),
                 i.key_pressed(Key::F6),
                 i.key_pressed(Key::PageDown),
                 i.key_pressed(Key::PageUp),
@@ -1251,6 +1392,9 @@ impl AsagiApp {
         });
         if save {
             self.save();
+        }
+        if f5 {
+            self.detect_pages(ctx, vec![self.page], false);
         }
         if f6 {
             self.start_translate(None);
@@ -1285,7 +1429,8 @@ impl eframe::App for AsagiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_job();
-        if self.job.is_some() {
+        self.poll_vision();
+        if self.job.is_some() || self.vision.as_ref().is_some_and(|v| v.pending > 0) {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         self.shortcuts(&ctx);

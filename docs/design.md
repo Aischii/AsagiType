@@ -31,8 +31,8 @@ Pure-Rust manga scanlation editor. Decisions were made with the owner on 2026-11
 
 | Stage | Task | Model | Licence | Notes |
 | --- | --- | --- | --- | --- |
-| 1 | Balloon, text and SFX detection | ogkalu comic-speech-bubble-detector (RT-DETR) | Apache-2.0 | Convert the weights once to safetensors, then write RT-DETR in candle |
-| 1 | Japanese OCR | kha-white manga-ocr (ViT encoder with BERT decoder) | Apache-2.0 | Encoder and decoder written in candle |
+| 1 (done) | Balloon and text detection | ogkalu comic-text-and-bubble-detector (RT-DETR v2, ResNet-50-vd) | Apache-2.0 | Loads the published float safetensors. Matches transformers to within 1e-4 on logits. SFX is not a class in this model |
+| 1 (done) | Japanese OCR | kha-white manga-ocr (ViT encoder with BERT decoder) | Apache-2.0 | Greedy decoding. Gives the same tokens as transformers on 14 of 15 test crops |
 | 1 | Cleaning | Solid fill inside the balloon, sampled from the balloon colour | — | Art SFX are never touched |
 | 2 | Inpainting | LaMa (manga fine-tune) | Apache-2.0 | Needs an FFT op in candle |
 | 3 | Glyph masks | Hi-SAM / Text-SAM | Apache-2.0 | Optional |

@@ -47,15 +47,15 @@ pub const SECTIONS: &[Section] = &[
             c("rfd", "Poly Meilex and contributors", "MIT", "https://github.com/PolyMeilex/rfd", "file dialogs"),
             c("serde, serde_json, anyhow", "David Tolnay and contributors", "MIT OR Apache-2.0", "https://github.com/serde-rs", "data and errors"),
             c("imagesize, dirs", "their authors", "MIT / MIT OR Apache-2.0", "https://crates.io", "utilities"),
-            c("candle", "Hugging Face", "MIT OR Apache-2.0", "https://github.com/huggingface/candle", "planned: ML runtime"),
+            c("candle", "Hugging Face", "MIT OR Apache-2.0", "https://github.com/huggingface/candle", "ML runtime (detection, OCR)"),
         ],
     },
     Section {
         title: "Models",
         note: "Weights are downloaded from the AsagiType releases, never bundled in the source.",
         items: &[
-            c("comic-speech-bubble-detector (RT-DETR)", "ogkalu", "Apache-2.0", "https://huggingface.co/ogkalu", "planned: balloon, text and SFX detection"),
-            c("manga-ocr", "Maciej Budys (kha-white)", "Apache-2.0", "https://github.com/kha-white/manga-ocr", "planned: Japanese OCR"),
+            c("comic-text-and-bubble-detector (RT-DETR v2)", "ogkalu", "Apache-2.0", "https://huggingface.co/ogkalu/comic-text-and-bubble-detector", "balloon and text detection"),
+            c("manga-ocr", "Maciej Budys (kha-white)", "Apache-2.0", "https://github.com/kha-white/manga-ocr", "Japanese OCR"),
             c("LaMa", "Suvorov et al., Samsung AI Center", "Apache-2.0", "https://github.com/advimman/lama", "planned: inpainting"),
         ],
     },

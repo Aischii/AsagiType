@@ -4,6 +4,7 @@ mod app;
 mod credits;
 mod settings;
 mod theme;
+mod vision_worker;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

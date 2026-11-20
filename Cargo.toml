@@ -13,6 +13,7 @@ authors = ["Aischii"]
 at2k = { path = "crates/at2k" }
 provider = { path = "crates/provider" }
 render = { path = "crates/render" }
+vision = { path = "crates/vision" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
