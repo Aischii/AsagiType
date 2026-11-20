@@ -3,6 +3,7 @@
 pub mod clean;
 pub mod detect;
 pub mod ocr;
+pub mod rotation;
 
 pub use detect::{Class, ComicDetector, Detection};
 pub use ocr::MangaOcr;

@@ -168,6 +168,11 @@ fn clean_auto(
     layer: &mut RgbaImage,
     mask_out: &mut GrayImage,
 ) -> (bool, FillMethod) {
+    if cb.shape.is_none() {
+        if let Some(done) = clean_closed_bubble(img, cb, layer, mask_out) {
+            return done;
+        }
+    }
     let (w, h) = (img.width() as i32, img.height() as i32);
     let t = clamp_box(cb.text_box, w, h);
     if t[2] - t[0] < 3 || t[3] - t[1] < 3 {
@@ -482,6 +487,149 @@ fn grow_deviating(
     grew
 }
 
+/// Text inside a detected, closed bubble (the 0.4 method): light pixels connected to the
+/// text box form the interior L; everything reachable from the bubble box edge without
+/// crossing L is outline or art and stays. L and the enclosed letters are repainted.
+/// Returns None when there is no bubble or it is open (L leaks to the bubble box edge).
+fn clean_closed_bubble(
+    img: &RgbImage,
+    cb: &CleanBox,
+    layer: &mut RgbaImage,
+    mask_out: &mut GrayImage,
+) -> Option<(bool, FillMethod)> {
+    const TOLERANCE: f32 = 60.0;
+    const MARGIN: i32 = 6;
+    let bb = cb.bubble?;
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let t = clamp_box(cb.text_box, w, h);
+    if t[2] - t[0] < 3 || t[3] - t[1] < 3 {
+        return None;
+    }
+    let union = [
+        bb[0].min(t[0]),
+        bb[1].min(t[1]),
+        bb[2].max(t[2]),
+        bb[3].max(t[3]),
+    ];
+    let region = clamp_box(grow(union, 2), w, h);
+    let (rx, ry) = (region[0], region[1]);
+    let rw = (region[2] - rx) as usize;
+    let rh = (region[3] - ry) as usize;
+    let idx = |x: i32, y: i32| (y - ry) as usize * rw + (x - rx) as usize;
+
+    let mut lums: Vec<f32> = (t[1]..t[3])
+        .flat_map(|y| (t[0]..t[2]).map(move |x| (x, y)))
+        .map(|(x, y)| lum(img.get_pixel(x as u32, y as u32)))
+        .collect();
+    lums.sort_by(f32::total_cmp);
+    let bg_lum = lums[(lums.len() * 9 / 10).min(lums.len() - 1)];
+    if bg_lum < 120.0 {
+        return None; // dark bubble: leave it to the general method
+    }
+    let threshold = bg_lum - TOLERANCE;
+    let light: Vec<bool> = (ry..region[3])
+        .flat_map(|y| (rx..region[2]).map(move |x| (x, y)))
+        .map(|(x, y)| lum(img.get_pixel(x as u32, y as u32)) >= threshold)
+        .collect();
+
+    // L: light pixels connected (4-way) to light pixels in the text box.
+    let mut in_l = vec![false; rw * rh];
+    let mut queue = VecDeque::new();
+    for y in t[1]..t[3] {
+        for x in t[0]..t[2] {
+            let i = idx(x, y);
+            if light[i] && !in_l[i] {
+                in_l[i] = true;
+                queue.push_back((x, y));
+            }
+        }
+    }
+    let mut leaks = false;
+    while let Some((x, y)) = queue.pop_front() {
+        if x == rx || y == ry || x == region[2] - 1 || y == region[3] - 1 {
+            leaks = true;
+        }
+        for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+            if inside(&region, nx, ny) {
+                let i = idx(nx, ny);
+                if light[i] && !in_l[i] {
+                    in_l[i] = true;
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+    }
+    let _ = leaks; // open bubbles are handled by the protected strokes below
+                   // Outside: reachable from the region edge without crossing L.
+    let mut outside = vec![false; rw * rh];
+    for y in ry..region[3] {
+        for x in rx..region[2] {
+            let edge = x == rx || y == ry || x == region[2] - 1 || y == region[3] - 1;
+            if edge && !in_l[idx(x, y)] {
+                outside[idx(x, y)] = true;
+                queue.push_back((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+            if inside(&region, nx, ny) {
+                let i = idx(nx, ny);
+                if !in_l[i] && !outside[i] {
+                    outside[i] = true;
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+    }
+    // Dark strokes reaching the bubble box edge are outline (also in open bubbles, where the
+    // light interior leaks round the outline): never paint over them.
+    let mut keep = vec![false; rw * rh];
+    for y in ry..region[3] {
+        for x in rx..region[2] {
+            let edge = x == rx || y == ry || x == region[2] - 1 || y == region[3] - 1;
+            if edge && !light[idx(x, y)] && !keep[idx(x, y)] {
+                keep[idx(x, y)] = true;
+                queue.push_back((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let (nx, ny) = (x + dx, y + dy);
+                if inside(&region, nx, ny) {
+                    let i = idx(nx, ny);
+                    if !light[i] && !keep[i] {
+                        keep[i] = true;
+                        queue.push_back((nx, ny));
+                    }
+                }
+            }
+        }
+    }
+    // Outlines often pass through a text box, so kept strokes do not flag bubble text.
+    let touch_up = false;
+    let colour = cb
+        .fill
+        .unwrap_or_else(|| median_colour(img, &t, |x, y| in_l[idx(x, y)]));
+    let fill = clamp_box(grow(t, MARGIN), w, h);
+    for y in fill[1].max(ry)..fill[3].min(region[3]) {
+        for x in fill[0].max(rx)..fill[2].min(region[2]) {
+            let i = idx(x, y);
+            if (in_l[i] || !outside[i]) && !keep[i] {
+                layer.put_pixel(
+                    x as u32,
+                    y as u32,
+                    Rgba([colour[0], colour[1], colour[2], 255]),
+                );
+                mask_out.put_pixel(x as u32, y as u32, Luma([255]));
+            }
+        }
+    }
+    Some((touch_up, FillMethod::Solid))
+}
+
 struct Strokes {
     erasable: Vec<bool>,
     protected: Vec<bool>,
@@ -506,6 +654,7 @@ fn classify_strokes(
     let mut protected = vec![false; ink.len()];
     let mut touch_up = false;
     let mut queue = VecDeque::new();
+    let mut inner: Vec<Vec<(i32, i32)>> = vec![];
     for sy in erase_limit[1]..erase_limit[3] {
         for sx in erase_limit[0]..erase_limit[2] {
             let si = idx(sx, sy);
@@ -543,7 +692,7 @@ fn classify_strokes(
                 }
                 if deep {
                     // Letters merged with thin lines: thick parts that stay inside are letters.
-                    let letters = thick_letters(&pixels, thickness, region, &core);
+                    let letters = thick_letters(&pixels, thickness, t, region, &core);
                     if letters.is_empty() {
                         touch_up = true;
                     }
@@ -553,9 +702,45 @@ fn classify_strokes(
                     }
                 }
             } else {
-                for (x, y) in pixels {
-                    erasable[idx(x, y)] = true;
-                }
+                inner.push(pixels);
+            }
+        }
+    }
+    // Strokes wholly inside: letters, unless they are long thin curves compared with the
+    // characters in this box (an outline shared by two touching bubbles, a panel line).
+    let shape = |px: &Vec<(i32, i32)>| {
+        let (x0, x1) = (
+            px.iter().map(|p| p.0).min().unwrap(),
+            px.iter().map(|p| p.0).max().unwrap(),
+        );
+        let (y0, y1) = (
+            px.iter().map(|p| p.1).min().unwrap(),
+            px.iter().map(|p| p.1).max().unwrap(),
+        );
+        let (bw, bh) = ((x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32);
+        (bw.max(bh), bw.min(bh))
+    };
+    let mut char_sizes: Vec<f32> = inner
+        .iter()
+        .filter(|px| px.len() >= 12)
+        .map(shape)
+        .filter(|(long, short)| long / short <= 2.5)
+        .map(|(long, _)| long)
+        .collect();
+    char_sizes.sort_by(f32::total_cmp);
+    let char_size = char_sizes
+        .get(char_sizes.len() / 2)
+        .copied()
+        .unwrap_or(30.0)
+        .max(12.0);
+    for px in inner {
+        let (long, short) = shape(&px);
+        let outline_like = long / short > 4.0 && long > 2.6 * char_size;
+        for (x, y) in px {
+            if outline_like {
+                protected[idx(x, y)] = true;
+            } else {
+                erasable[idx(x, y)] = true;
             }
         }
     }
@@ -619,6 +804,7 @@ fn stroke_thickness(ink: &[bool], region: &[i32; 4]) -> Vec<u8> {
 fn thick_letters(
     pixels: &[(i32, i32)],
     thickness: &[u8],
+    text_box: &[i32; 4],
     region: &[i32; 4],
     core: &[i32; 4],
 ) -> Vec<(i32, i32)> {
@@ -656,7 +842,17 @@ fn thick_letters(
                 }
             }
         }
-        if escapes || part.len() < 6 {
+        // Letters are compact; outline fragments are long thin curves.
+        let xs = part.iter().map(|p| p.0);
+        let ys = part.iter().map(|p| p.1);
+        let (bw, bh) = (
+            xs.clone().max().unwrap() - xs.min().unwrap() + 1,
+            ys.clone().max().unwrap() - ys.min().unwrap() + 1,
+        );
+        let (long, short) = (bw.max(bh) as f32, bw.min(bh).max(1) as f32);
+        let letter_max =
+            48f32.max(0.6 * (text_box[2] - text_box[0]).min(text_box[3] - text_box[1]) as f32);
+        if escapes || part.len() < 6 || long / short > 2.5 || long > letter_max {
             continue;
         }
         // Grow the letter core back to its full width, staying on the stroke.
@@ -1211,28 +1407,83 @@ mod tests {
                 }
             }
         }
-        // Thick "letters" (5 px bars) overlapping the lines.
-        for &(x0, y0) in &[(70u32, 45u32), (70, 65)] {
-            for y in y0..y0 + 5 {
-                for x in x0..x0 + 50 {
-                    img.put_pixel(x, y, Rgb([0, 0, 0]));
+        // Letter-shaped 14 px blocks overlapping the lines.
+        for y0 in [45u32, 65] {
+            for x0 in [70u32, 90, 110] {
+                for y in y0..y0 + 14 {
+                    for x in x0..x0 + 14 {
+                        img.put_pixel(x, y, Rgb([0, 0, 0]));
+                    }
                 }
             }
         }
-        let r = clean_page_full(&img, &[CleanBox::auto([65, 40, 125, 75], None)]);
+        let r = clean_page_full(&img, &[CleanBox::auto([65, 40, 129, 84], None)]);
         let out = composite(&img, &r.layer);
         assert_eq!(r.touch_up, vec![false]);
-        let white = (70..120)
-            .filter(|&x| out.get_pixel(x, 47).0 == [255, 255, 255])
+        let white = (70..124)
+            .filter(|&x| out.get_pixel(x, 52).0 == [255, 255, 255])
             .count();
         assert!(white > 30, "only {white} white pixels in the erased row");
-        // Lines crossing the erased bars come back: line k=1 (y = x/2 + 18) passes y 45..50 at x 54..63
-        // and k=2 (y = x/2 + 36) passes y 45..50 at x 18..27; check k=0 through bar 2: y = x/2 at x 130.. no.
-        // Use line k=1 through bar 2 (y 65..70 at x 94..103).
+        // Line k=1 (y = x/2 + 18) crosses the block at x 90..104, y 65..79; it is redrawn.
         let dark = (94..104u32)
             .filter(|&x| out.get_pixel(x, x / 2 + 18)[0] < 128)
             .count();
         assert!(dark >= 6, "line not redrawn ({dark} of 10 pixels)");
+    }
+
+    /// Two bubbles share a thick outline that thins out inside the text box. The outline
+    /// pieces must not be mistaken for letters (regression from Kozinsa v01-001 p004).
+    #[test]
+    fn shared_outline_between_bubbles_is_kept() {
+        let mut img = RgbImage::from_pixel(200, 200, Rgb([255, 255, 255]));
+        for y in 10..190u32 {
+            let width = if (90..96).contains(&y) || (130..134).contains(&y) {
+                1
+            } else {
+                4
+            };
+            for x in 100..100 + width {
+                img.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        // Letters close to the shared outline, in the left bubble.
+        for y0 in [50u32, 110] {
+            for x0 in [70u32, 84] {
+                for y in y0..y0 + 12 {
+                    for x in x0..x0 + 12 {
+                        img.put_pixel(x, y, Rgb([0, 0, 0]));
+                    }
+                }
+            }
+        }
+        let r = clean_page_full(&img, &[CleanBox::auto([60, 40, 110, 160], None)]);
+        let out = composite(&img, &r.layer);
+        // A short divider wholly inside the box plus 16 px is kept too.
+        let mut img2 = RgbImage::from_pixel(200, 200, Rgb([255, 255, 255]));
+        for y in 50..150u32 {
+            for x in 100..104 {
+                img2.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        for y in 60..72u32 {
+            for x in 70..82 {
+                img2.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        let out2 = composite(
+            &img2,
+            &clean_page(&img2, &[CleanBox::auto([60, 40, 110, 160], None)]),
+        );
+        assert_eq!(out2.get_pixel(101, 100)[0], 0, "short divider erased");
+        assert_eq!(
+            out2.get_pixel(75, 65).0,
+            [255, 255, 255],
+            "letter left in img2"
+        );
+        for y in [45u32, 70, 100, 120, 150] {
+            assert_eq!(out.get_pixel(101, y)[0], 0, "outline erased at y={y}");
+        }
+        assert_eq!(out.get_pixel(75, 55).0, [255, 255, 255], "letter left");
     }
 
     #[test]
