@@ -72,6 +72,12 @@ pub struct Balloon {
     /// Locked boxes cannot be moved, resized or deleted.
     #[serde(default)]
     pub locked: bool,
+    /// Text angle in degrees, clockwise; the lettering is drawn at this angle.
+    #[serde(default)]
+    pub rotation: f32,
+    /// Lettering frame for rotated text as a fraction of the box [w, h]; None uses the box.
+    #[serde(default)]
+    pub frame: Option<[f32; 2]>,
 }
 
 impl Balloon {
@@ -97,6 +103,8 @@ impl Balloon {
             outline: None,
             hidden: false,
             locked: false,
+            rotation: 0.0,
+            frame: None,
         }
     }
 
@@ -690,6 +698,7 @@ mod v2_tests {
         let b: Balloon = serde_json::from_str(v1).unwrap();
         assert!(!b.ignore && !b.bold && b.font.is_none());
         assert!(!b.hidden && !b.locked && b.fill.is_none() && b.outline.is_none());
+        assert_eq!((b.rotation, b.frame), (0.0, None));
         assert_eq!(b.shape, BubbleShape::Auto);
         assert_eq!((b.case, b.align), (TextCase::AsTyped, Align::Center));
         let m: Manifest = serde_json::from_str(

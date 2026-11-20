@@ -119,6 +119,19 @@ fn render_align(a: Align) -> render::Align {
     }
 }
 
+/// Size in page px of the block the lettering is fitted to: the rotated frame when the
+/// text is tilted, otherwise the box.
+fn lettering_size(b: &Balloon) -> [f32; 2] {
+    let (bw, bh) = (
+        (b.text_box[2] - b.text_box[0]).max(1) as f32,
+        (b.text_box[3] - b.text_box[1]).max(1) as f32,
+    );
+    match b.frame {
+        Some([fw, fh]) if b.rotation != 0.0 => [(bw * fw).max(1.0), (bh * fh).max(1.0)],
+        _ => [bw, bh],
+    }
+}
+
 impl AsagiApp {
     fn balloon_mut(&mut self, id: u32) -> Option<&mut Balloon> {
         let page = self.page;
@@ -141,8 +154,8 @@ impl AsagiApp {
             .clone()
             .unwrap_or_else(|| self.settings.font_for(&b.role));
         let text = b.display_text();
-        let w = (b.text_box[2] - b.text_box[0]).max(1) as u32;
-        let h = (b.text_box[3] - b.text_box[1]).max(1) as u32;
+        let [w, h] = lettering_size(b);
+        let (w, h) = (w as u32, h as u32);
         let style = render::Style {
             family: &family,
             bold: b.bold,
@@ -325,12 +338,22 @@ impl AsagiApp {
                                 p.rect_filled(r, 0.0, Color32::WHITE);
                             }
                             if let Some((t, fits)) = self.lettering(ctx, b) {
-                                p.image(
-                                    t.id(),
-                                    r,
+                                let [fw, fh] = lettering_size(b);
+                                let frame =
+                                    Rect::from_center_size(r.center(), Vec2::new(fw, fh) * z);
+                                let mut mesh = egui::Mesh::with_texture(t.id());
+                                mesh.add_rect_with_uv(
+                                    frame,
                                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                                     Color32::WHITE,
                                 );
+                                if b.rotation != 0.0 {
+                                    mesh.rotate(
+                                        egui::emath::Rot2::from_angle(b.rotation.to_radians()),
+                                        r.center(),
+                                    );
+                                }
+                                p.add(egui::Shape::mesh(mesh));
                                 if !fits {
                                     p.rect_stroke(
                                         r,
@@ -600,6 +623,10 @@ impl AsagiApp {
                     ui.selectable_value(&mut b.role, r.to_string(), *r);
                 }
             });
+            ui.end_row();
+            ui.label("Rotation");
+            ui.add(egui::DragValue::new(&mut b.rotation).range(-90.0..=90.0).speed(0.5).suffix(" deg"))
+                .on_hover_text("Lettering angle, clockwise. Detect + OCR sets it for tilted text (3 deg or more).");
             ui.end_row();
             ui.label("Box");
             ui.label(format!("{} x {} at {}, {}", b.text_box[2] - b.text_box[0], b.text_box[3] - b.text_box[1], b.text_box[0], b.text_box[1]));

@@ -291,6 +291,8 @@ impl AsagiApp {
                             let mut b = Balloon::new(i as u32 + 1, t.kind, t.text_box);
                             b.bubble = t.bubble;
                             b.source_text = t.source_text;
+                            b.rotation = t.rotation;
+                            b.frame = t.frame;
                             b
                         })
                         .collect();

@@ -16,12 +16,8 @@ fn main() -> anyhow::Result<()> {
     );
     for r in regions {
         println!(
-            "{:<8} {:.2} {:?} bubble={} {}",
-            r.kind,
-            r.score,
-            r.text_box,
-            r.bubble.is_some(),
-            r.source_text
+            "{:<8} {:.2} {:?} rot={} frame={:?} {}",
+            r.kind, r.score, r.text_box, r.rotation, r.frame, r.source_text
         );
     }
     Ok(())

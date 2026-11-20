@@ -22,6 +22,10 @@ pub struct TextRegion {
     pub bubble: Option<[i32; 4]>,
     pub source_text: String,
     pub score: f32,
+    /// Text angle in degrees (clockwise); 0 for level text.
+    pub rotation: f32,
+    /// Lettering frame for rotated text, as a fraction of the box size [w, h].
+    pub frame: Option<[f32; 2]>,
 }
 
 pub struct Models {
@@ -75,6 +79,25 @@ impl Models {
                 (tb[2] - tb[0]) as u32,
                 (tb[3] - tb[1]) as u32,
             );
+            // Tilted text: OCR the straightened crop, letter in a rotated frame.
+            let angle = rotation::estimate(&crop.to_rgb8());
+            let (ocr_crop, frame) = if angle.degrees != 0.0 {
+                let straight = rotation::straighten(&crop.to_rgb8(), angle.degrees);
+                let (bw, bh) = ((tb[2] - tb[0]) as f32, (tb[3] - tb[1]) as f32);
+                let [along, across] = angle.extent;
+                // Frame is along x across for lines, across x along for columns.
+                let (fw, fh) = if angle.vertical {
+                    (across, along)
+                } else {
+                    (along, across)
+                };
+                (
+                    image::DynamicImage::ImageRgb8(straight),
+                    Some([(fw / bw).min(1.0), (fh / bh).min(1.0)]),
+                )
+            } else {
+                (crop.clone(), None)
+            };
             regions.push(TextRegion {
                 kind: if bubble.is_some() {
                     "dialogue"
@@ -83,8 +106,10 @@ impl Models {
                 },
                 text_box: tb,
                 bubble,
-                source_text: self.ocr.recognize(&crop)?,
+                source_text: self.ocr.recognize(&ocr_crop)?,
                 score: d.score,
+                rotation: angle.degrees,
+                frame,
             });
         }
         reading_order(&mut regions, h);
