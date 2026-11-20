@@ -228,6 +228,15 @@ pub struct Page {
     /// Covers, contents pages and logos stay untouched.
     #[serde(default)]
     pub raw_only: bool,
+    /// Archive entry of the clean layer (`clean/<id>.png`, RGBA, page size), once cleaned.
+    #[serde(default)]
+    pub clean: Option<String>,
+}
+
+impl Page {
+    pub fn clean_entry_name(&self) -> String {
+        format!("clean/{}.png", self.id)
+    }
 }
 
 impl Page {
@@ -395,6 +404,7 @@ pub fn create(out: &Path, meta: NewProject, images: &[PathBuf]) -> Result<Manife
             balloons: vec![],
             sfx: vec![],
             raw_only: false,
+            clean: None,
         });
     }
     let manifest = Manifest {
@@ -445,6 +455,15 @@ pub fn open(path: &Path) -> Result<Manifest> {
 /// Rewrite the archive with a new manifest; other entries are copied raw.
 /// The file is written in the current format version.
 pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
+    save_with_files(path, manifest, &[])
+}
+
+/// Like [`save`], also adding or replacing archive entries (for example clean layers).
+pub fn save_with_files(
+    path: &Path,
+    manifest: &Manifest,
+    files: &[(String, Vec<u8>)],
+) -> Result<()> {
     let mut manifest = manifest.clone();
     manifest.version = FORMAT_VERSION;
     let manifest = &manifest;
@@ -454,9 +473,14 @@ pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
         let mut zw = ZipWriter::new(File::create(&tmp)?);
         for i in 0..za.len() {
             let f = za.by_index_raw(i)?;
-            if f.name() != MANIFEST {
+            if f.name() != MANIFEST && !files.iter().any(|(n, _)| n == f.name()) {
                 zw.raw_copy_file(f)?;
             }
+        }
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, bytes) in files {
+            zw.start_file(name.as_str(), stored)?;
+            zw.write_all(bytes)?;
         }
         zw.start_file(MANIFEST, SimpleFileOptions::default())?;
         zw.write_all(serde_json::to_string_pretty(manifest)?.as_bytes())?;
@@ -584,6 +608,17 @@ mod tests {
         assert_eq!(back, m);
         assert_eq!(back.pages[0].balloons[0].display_text(), "HELLO.");
         assert!(back.pages[0].balloons[0].bold);
+        // Clean layers are added, then replaced in place.
+        let mut m2 = back.clone();
+        let name = m2.pages[0].clean_entry_name();
+        m2.pages[0].clean = Some(name.clone());
+        save_with_files(&out, &m2, &[(name.clone(), vec![1, 2, 3])]).unwrap();
+        save_with_files(&out, &m2, &[(name.clone(), vec![4, 5])]).unwrap();
+        assert_eq!(read_entry(&out, &name).unwrap(), vec![4, 5]);
+        assert_eq!(
+            open(&out).unwrap().pages[0].clean.as_deref(),
+            Some("clean/001.png")
+        );
         assert_eq!(read_entry(&out, "pages/001.png").unwrap(), png);
         fs::remove_dir_all(&dir).unwrap();
     }

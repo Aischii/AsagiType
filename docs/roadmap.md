@@ -47,13 +47,13 @@ Each change below comes with a test, and v1 files must still open.
 
 ## Releases
 
-### 0.3: editing
+### 0.3: editing (done)
 
 - Synced side-by-side panes, with a toggle back to a single pane.
 - Move and resize handles, nudging, and live refit.
 - Typography panel: font, size, presets, bold, italic, case and alignment. Needs `.at2k` v2.
 
-### 0.4: cleaning and pipeline
+### 0.4: cleaning and pipeline (done)
 
 - Solid-fill cleaning into the clean layer, clipped to the bubble. The Translated pane composites source, then clean layer, then lettering.
 - The Auto button with This page / All pages scope, a progress dialog and Cancel.

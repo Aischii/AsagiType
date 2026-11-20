@@ -1,5 +1,6 @@
 //! Pure-Rust (candle) vision models for AsagiType 2000.
 
+pub mod clean;
 pub mod detect;
 pub mod ocr;
 

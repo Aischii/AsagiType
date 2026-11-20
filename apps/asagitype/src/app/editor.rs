@@ -295,16 +295,28 @@ impl AsagiApp {
                     };
 
                     // Lettering on the translated pane: white fill over the source text, then the English.
+                    let clean = self.clean_texture(ctx);
                     for &(rect, translated) in &layout {
                         if !translated {
                             continue;
+                        }
+                        if let Some(c) = &clean {
+                            p.image(
+                                c.id(),
+                                rect,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
                         }
                         for b in &page.balloons {
                             if b.ignore || b.text.trim().is_empty() {
                                 continue;
                             }
                             let r = to_screen(rect, b.text_box);
-                            p.rect_filled(r, 0.0, Color32::WHITE);
+                            // Without a clean layer, a white box stands in as a preview.
+                            if clean.is_none() {
+                                p.rect_filled(r, 0.0, Color32::WHITE);
+                            }
                             if let Some((t, fits)) = self.lettering(ctx, b) {
                                 p.image(
                                     t.id(),

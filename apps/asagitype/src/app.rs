@@ -1,19 +1,21 @@
 //! Main window: title bar, menus, toolbar, project/page lists, canvas, balloon panel, dialogs.
 
 mod editor;
+mod pipeline;
 
-use crate::vision_worker::{Request, VisionWorker};
+use crate::vision_worker::VisionWorker;
 use crate::{
     credits,
     settings::{Settings, ROLES},
     theme,
 };
-use at2k::{Balloon, Manifest};
+use at2k::Manifest;
 use editor::Drag;
 use eframe::egui::{
     self, Color32, ColorImage, Key, Rect, Sense, TextureHandle, TextureOptions, Vec2,
     ViewportCommand,
 };
+use pipeline::AutoRun;
 use provider::{BalloonIn, BalloonOut, PageRequest, PRESETS};
 use render::Renderer;
 use std::{
@@ -70,6 +72,11 @@ pub struct AsagiApp {
     status: String,
     job: Option<TranslateJob>,
     vision: Option<VisionWorker>,
+    /// Clean layers produced since the last save, PNG by page index.
+    pending_clean: HashMap<usize, Vec<u8>>,
+    clean_tex: Option<(String, TextureHandle)>,
+    auto: Option<AutoRun>,
+    auto_all: bool,
     settings_form: SettingsForm,
     import_form: ImportForm,
     about_open: bool,
@@ -106,6 +113,10 @@ impl AsagiApp {
             status,
             job: None,
             vision: None,
+            pending_clean: HashMap::new(),
+            clean_tex: None,
+            auto: None,
+            auto_all: false,
             settings_form: SettingsForm::default(),
             import_form: ImportForm::default(),
             about_open: false,
@@ -132,6 +143,9 @@ impl AsagiApp {
                 self.path = Some(path);
                 self.page = 0;
                 self.page_tex = None;
+                self.clean_tex = None;
+                self.pending_clean.clear();
+                self.auto = None;
                 self.selected = None;
                 self.dirty = false;
             }
@@ -143,8 +157,14 @@ impl AsagiApp {
         let (Some(path), Some(m)) = (&self.path, &self.manifest) else {
             return;
         };
-        match at2k::save(path, m) {
+        let files: Vec<(String, Vec<u8>)> = self
+            .pending_clean
+            .iter()
+            .filter_map(|(i, png)| m.pages.get(*i).map(|p| (p.clean_entry_name(), png.clone())))
+            .collect();
+        match at2k::save_with_files(path, m, &files) {
             Ok(()) => {
+                self.pending_clean.clear();
                 self.dirty = false;
                 self.status = format!("Saved {}", path.display());
                 self.refresh_projects();
@@ -242,11 +262,15 @@ impl AsagiApp {
     }
 
     fn start_translate(&mut self, only: Option<u32>) {
+        self.start_translate_page(self.page, only);
+    }
+
+    fn start_translate_page(&mut self, page_idx: usize, only: Option<u32>) {
         if self.job.is_some() {
             return;
         }
         let Some(m) = &self.manifest else { return };
-        let Some(page) = m.pages.get(self.page) else {
+        let Some(page) = m.pages.get(page_idx) else {
             return;
         };
         if page.balloons.is_empty() {
@@ -256,8 +280,8 @@ impl AsagiApp {
             ));
             return;
         }
-        let previous_lines = if self.page > 0 {
-            let prev = &m.pages[self.page - 1].balloons;
+        let previous_lines = if page_idx > 0 {
+            let prev = &m.pages[page_idx - 1].balloons;
             {
                 let lines: Vec<String> = prev
                     .iter()
@@ -301,97 +325,10 @@ impl AsagiApp {
             self.settings.provider.model
         );
         self.job = Some(TranslateJob {
-            page: self.page,
+            page: page_idx,
             only,
             rx,
         });
-    }
-
-    /// Queue detection + OCR. Pages that already have balloons are skipped unless `replace`.
-    fn detect_pages(&mut self, ctx: &egui::Context, pages: Vec<usize>, replace: bool) {
-        let (Some(path), Some(m)) = (self.path.clone(), &self.manifest) else {
-            return;
-        };
-        let dir = PathBuf::from(&self.settings.models_dir);
-        if self.vision.as_ref().is_none_or(|v| v.models_dir != dir) {
-            if self.vision.as_ref().is_some_and(|v| v.pending > 0) {
-                self.message = Some(("Wait for the current detection to finish.".into(), false));
-                return;
-            }
-            self.vision = Some(VisionWorker::spawn(dir, ctx.clone()));
-        }
-        let todo: Vec<(usize, String)> = pages
-            .into_iter()
-            .filter_map(|i| m.pages.get(i).map(|p| (i, p)))
-            .filter(|(_, p)| !p.raw_only && (replace || p.balloons.is_empty()))
-            .map(|(i, p)| (i, p.image.clone()))
-            .collect();
-        if todo.is_empty() {
-            self.status =
-                "Nothing to detect: these pages already have balloons (use Redetect to replace)."
-                    .into();
-            return;
-        }
-        let mut queued = 0;
-        for (page, image) in todo {
-            match at2k::read_entry(&path, &image) {
-                Ok(bytes) => {
-                    self.vision.as_mut().unwrap().submit(Request {
-                        page,
-                        bytes,
-                        replace,
-                    });
-                    queued += 1;
-                }
-                Err(e) => {
-                    self.error(format!("Could not read {image}:\n{e:#}"));
-                    return;
-                }
-            }
-        }
-        self.status = format!("Detecting text and running OCR on {queued} page(s)... (the first run loads the models)");
-    }
-
-    fn poll_vision(&mut self) {
-        let Some(worker) = &mut self.vision else {
-            return;
-        };
-        let results = worker.poll();
-        let pending = worker.pending;
-        for r in results {
-            match r.result {
-                Ok(regions) => {
-                    let Some(page) = self.manifest.as_mut().and_then(|m| m.pages.get_mut(r.page))
-                    else {
-                        continue;
-                    };
-                    if !r.replace && !page.balloons.is_empty() {
-                        continue;
-                    }
-                    page.balloons = regions
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, t)| {
-                            let mut b = Balloon::new(i as u32 + 1, t.kind, t.text_box);
-                            b.bubble = t.bubble;
-                            b.source_text = t.source_text;
-                            b
-                        })
-                        .collect();
-                    let msg = format!("Page {} done: {} text areas.", page.id, page.balloons.len());
-                    if r.page == self.page {
-                        self.selected = None;
-                    }
-                    self.dirty = true;
-                    self.status = if pending > 0 {
-                        format!("{msg} {pending} page(s) left...")
-                    } else {
-                        msg
-                    };
-                }
-                Err(e) => self.error(format!("Detection failed:\n{e}")),
-            }
-        }
     }
 
     fn poll_job(&mut self) {
@@ -560,6 +497,37 @@ impl AsagiApp {
                         self.detect_pages(ctx, vec![self.page], true);
                         ui.close();
                     }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Clean page"))
+                        .clicked()
+                    {
+                        self.clean_pages(ctx, vec![self.page]);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Clean whole chapter"))
+                        .clicked()
+                    {
+                        let n = self.manifest.as_ref().map(|m| m.pages.len()).unwrap_or(0);
+                        self.clean_pages(ctx, (0..n).collect());
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(self.auto.is_none(), egui::Button::new("Auto: this page"))
+                        .clicked()
+                    {
+                        self.start_auto(vec![self.page]);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(self.auto.is_none(), egui::Button::new("Auto: all pages"))
+                        .clicked()
+                    {
+                        let n = self.manifest.as_ref().map(|m| m.pages.len()).unwrap_or(0);
+                        self.start_auto((0..n).collect());
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Translate page  (F6)").clicked() {
                         self.start_translate(None);
@@ -643,6 +611,33 @@ impl AsagiApp {
                 ui.selectable_value(&mut self.tool, Tool::Select, "Select");
                 ui.selectable_value(&mut self.tool, Tool::Draw, "Draw balloon");
                 ui.separator();
+                let has_project = self.manifest.is_some();
+                if ui
+                    .add_enabled(
+                        has_project && self.auto.is_none(),
+                        egui::Button::new(egui::RichText::new("Auto").strong()),
+                    )
+                    .on_hover_text("Run the missing steps: detect + OCR, translate, clean")
+                    .clicked()
+                {
+                    let pages = if self.auto_all {
+                        (0..self.manifest.as_ref().map(|m| m.pages.len()).unwrap_or(0)).collect()
+                    } else {
+                        vec![self.page]
+                    };
+                    self.start_auto(pages);
+                }
+                egui::ComboBox::from_id_salt("auto_scope")
+                    .selected_text(if self.auto_all {
+                        "All pages"
+                    } else {
+                        "This page"
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.auto_all, false, "This page");
+                        ui.selectable_value(&mut self.auto_all, true, "All pages");
+                    });
+                ui.separator();
                 let detecting = self.vision.as_ref().map(|v| v.pending).unwrap_or(0);
                 let label = if detecting > 0 {
                     format!("Detecting ({detecting})...")
@@ -658,6 +653,13 @@ impl AsagiApp {
                 {
                     let ctx = ui.ctx().clone();
                     self.detect_pages(&ctx, vec![self.page], false);
+                }
+                if ui
+                    .add_enabled(detecting == 0 && has_project, egui::Button::new("Clean"))
+                    .clicked()
+                {
+                    let ctx = ui.ctx().clone();
+                    self.clean_pages(&ctx, vec![self.page]);
                 }
                 let busy = self.job.is_some();
                 if ui
@@ -1209,7 +1211,8 @@ impl eframe::App for AsagiApp {
         let ctx = ui.ctx().clone();
         self.poll_job();
         self.poll_vision();
-        if self.job.is_some() || self.vision.as_ref().is_some_and(|v| v.pending > 0) {
+        self.step_auto(&ctx);
+        if self.job.is_some() || self.vision_busy() || self.auto.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         self.shortcuts(&ctx);
@@ -1222,5 +1225,6 @@ impl eframe::App for AsagiApp {
         self.right_panel(ui);
         self.canvas(ui);
         self.dialogs(&ctx);
+        self.auto_dialog(&ctx);
     }
 }

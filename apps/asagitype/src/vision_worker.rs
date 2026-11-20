@@ -1,24 +1,43 @@
-//! Background thread that owns the candle models (loaded on first use) and
-//! runs detection + OCR on page images.
+//! Background thread that owns the candle models (loaded on first use) and runs
+//! detection + OCR and cleaning on page images.
 
 use eframe::egui;
 use std::{
+    io::Cursor,
     path::PathBuf,
     sync::mpsc::{channel, Receiver, Sender},
     thread,
 };
-use vision::{Models, TextRegion};
+use vision::{
+    clean::{clean_page, CleanBox},
+    Models, TextRegion,
+};
 
-pub struct Request {
-    pub page: usize,
-    pub bytes: Vec<u8>,
-    pub replace: bool,
+pub enum Request {
+    Analyze {
+        page: usize,
+        bytes: Vec<u8>,
+        replace: bool,
+    },
+    Clean {
+        page: usize,
+        bytes: Vec<u8>,
+        boxes: Vec<CleanBox>,
+    },
+}
+
+pub enum Outcome {
+    Analyzed {
+        replace: bool,
+        regions: Vec<TextRegion>,
+    },
+    /// PNG-encoded RGBA clean layer.
+    Cleaned { png: Vec<u8> },
 }
 
 pub struct PageResult {
     pub page: usize,
-    pub replace: bool,
-    pub result: Result<Vec<TextRegion>, String>,
+    pub result: Result<Outcome, String>,
 }
 
 pub struct VisionWorker {
@@ -30,6 +49,50 @@ pub struct VisionWorker {
 
 const THRESHOLD: f32 = 0.5;
 
+fn run(
+    models: &mut Option<Models>,
+    dir: &std::path::Path,
+    req: Request,
+) -> (usize, Result<Outcome, String>) {
+    match req {
+        Request::Analyze {
+            page,
+            bytes,
+            replace,
+        } => {
+            let result = (|| {
+                if models.is_none() {
+                    *models = Some(Models::load(dir).map_err(|e| {
+                        format!("Could not load models from {}:\n{e:#}", dir.display())
+                    })?);
+                }
+                let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+                let regions = models
+                    .as_ref()
+                    .unwrap()
+                    .analyze(&img, THRESHOLD)
+                    .map_err(|e| format!("{e:#}"))?;
+                Ok(Outcome::Analyzed { replace, regions })
+            })();
+            (page, result)
+        }
+        Request::Clean { page, bytes, boxes } => {
+            let result = (|| {
+                let img = image::load_from_memory(&bytes)
+                    .map_err(|e| e.to_string())?
+                    .to_rgb8();
+                let layer = clean_page(&img, &boxes);
+                let mut png = Vec::new();
+                layer
+                    .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                Ok(Outcome::Cleaned { png })
+            })();
+            (page, result)
+        }
+    }
+}
+
 impl VisionWorker {
     pub fn spawn(models_dir: PathBuf, ctx: egui::Context) -> Self {
         let (tx, req_rx) = channel::<Request>();
@@ -40,24 +103,8 @@ impl VisionWorker {
             .spawn(move || {
                 let mut models: Option<Models> = None;
                 for req in req_rx {
-                    let result = (|| -> Result<Vec<TextRegion>, String> {
-                        if models.is_none() {
-                            models = Some(Models::load(&dir).map_err(|e| {
-                                format!("Could not load models from {}:\n{e:#}", dir.display())
-                            })?);
-                        }
-                        let img = image::load_from_memory(&req.bytes).map_err(|e| e.to_string())?;
-                        models
-                            .as_ref()
-                            .unwrap()
-                            .analyze(&img, THRESHOLD)
-                            .map_err(|e| format!("{e:#}"))
-                    })();
-                    let _ = res_tx.send(PageResult {
-                        page: req.page,
-                        replace: req.replace,
-                        result,
-                    });
+                    let (page, result) = run(&mut models, &dir, req);
+                    let _ = res_tx.send(PageResult { page, result });
                     ctx.request_repaint();
                 }
             })
