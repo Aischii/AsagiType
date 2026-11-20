@@ -36,7 +36,13 @@ pub fn apply(ctx: &egui::Context) {
     }
     // Japanese fallback so OCR text and glossaries render instead of empty boxes.
     // The first Windows font found wins; .ttc collections use face 0.
-    for file in ["YuGothM.ttc", "meiryo.ttc", "BIZ-UDGothicR.ttc", "NotoSansJP-VF.ttf", "msgothic.ttc"] {
+    for file in [
+        "YuGothM.ttc",
+        "meiryo.ttc",
+        "BIZ-UDGothicR.ttc",
+        "NotoSansJP-VF.ttf",
+        "msgothic.ttc",
+    ] {
         if let Ok(bytes) = std::fs::read(format!("C:/Windows/Fonts/{file}")) {
             fonts
                 .font_data

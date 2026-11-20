@@ -1,5 +1,7 @@
 //! Main window: title bar, menus, toolbar, project/page lists, canvas, balloon panel, dialogs.
 
+mod editor;
+
 use crate::vision_worker::{Request, VisionWorker};
 use crate::{
     credits,
@@ -7,15 +9,15 @@ use crate::{
     theme,
 };
 use at2k::{Balloon, Manifest};
+use editor::Drag;
 use eframe::egui::{
-    self, Color32, ColorImage, Key, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
+    self, Color32, ColorImage, Key, Rect, Sense, TextureHandle, TextureOptions, Vec2,
     ViewportCommand,
 };
 use provider::{BalloonIn, BalloonOut, PageRequest, PRESETS};
 use render::Renderer;
 use std::{
     collections::HashMap,
-    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::mpsc::{channel, Receiver},
 };
@@ -61,7 +63,8 @@ pub struct AsagiApp {
     dirty: bool,
     zoom: f32,
     tool: Tool,
-    drag_from: Option<Pos2>,
+    drag: Option<Drag>,
+    side_by_side: bool,
     show_text: bool,
     show_boxes: bool,
     status: String,
@@ -96,7 +99,8 @@ impl AsagiApp {
             dirty: false,
             zoom: 0.5,
             tool: Tool::Select,
-            drag_from: None,
+            drag: None,
+            side_by_side: true,
             show_text: true,
             show_boxes: true,
             status,
@@ -192,6 +196,7 @@ impl AsagiApp {
             source_lang: "ja".into(),
             target_lang: lang,
             glossary,
+            presets: self.settings.presets.clone(),
         };
         match at2k::create(&out, meta, images) {
             Ok(_) => {
@@ -236,34 +241,6 @@ impl AsagiApp {
         }
     }
 
-    fn lettering(&mut self, ctx: &egui::Context, b: &Balloon) -> Option<(TextureHandle, bool)> {
-        let family = self.settings.font_for(&b.role);
-        let w = (b.text_box[2] - b.text_box[0]).max(1) as u32;
-        let h = (b.text_box[3] - b.text_box[1]).max(1) as u32;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (&b.text, &family, w, h, b.size.to_bits()).hash(&mut hasher);
-        let key = hasher.finish();
-        if let Some(hit) = self.letter_cache.get(&key) {
-            return hit.clone();
-        }
-        let made = self
-            .renderer
-            .letter(&b.text, &family, w, h, b.size)
-            .map(|l| {
-                let ci =
-                    ColorImage::from_rgba_premultiplied([w as usize, h as usize], l.pixmap.data());
-                (
-                    ctx.load_texture(format!("letter-{key}"), ci, TextureOptions::LINEAR),
-                    l.fits,
-                )
-            });
-        if self.letter_cache.len() > 400 {
-            self.letter_cache.clear();
-        }
-        self.letter_cache.insert(key, made.clone());
-        made
-    }
-
     fn start_translate(&mut self, only: Option<u32>) {
         if self.job.is_some() {
             return;
@@ -302,6 +279,7 @@ impl AsagiApp {
             balloons: page
                 .balloons
                 .iter()
+                .filter(|b| !b.ignore)
                 .map(|b| BalloonIn {
                     id: b.id,
                     kind: b.kind.clone(),
@@ -393,15 +371,11 @@ impl AsagiApp {
                     page.balloons = regions
                         .into_iter()
                         .enumerate()
-                        .map(|(i, t)| Balloon {
-                            id: i as u32 + 1,
-                            kind: t.kind.into(),
-                            text_box: t.text_box,
-                            bubble: t.bubble,
-                            source_text: t.source_text,
-                            text: String::new(),
-                            role: "dialogue".into(),
-                            size: 0.0,
+                        .map(|(i, t)| {
+                            let mut b = Balloon::new(i as u32 + 1, t.kind, t.text_box);
+                            b.bubble = t.bubble;
+                            b.source_text = t.source_text;
+                            b
                         })
                         .collect();
                     let msg = format!("Page {} done: {} text areas.", page.id, page.balloons.len());
@@ -612,7 +586,8 @@ impl AsagiApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.show_text, "Show translation");
+                    ui.checkbox(&mut self.side_by_side, "Original | Translated side by side");
+                    ui.checkbox(&mut self.show_text, "Show translation (single pane)");
                     ui.checkbox(&mut self.show_boxes, "Show boxes");
                 });
                 ui.menu_button("Tools", |ui| {
@@ -864,206 +839,10 @@ impl AsagiApp {
                     self.selected = select;
                 }
                 theme::caption(ui, "Properties");
-                let sel = self.selected;
-                let mut changed = false;
-                let mut delete = false;
-                let mut retranslate = false;
-                if let Some(b) = self
-                    .manifest
-                    .as_mut()
-                    .and_then(|m| m.pages.get_mut(page_idx))
-                    .and_then(|p| p.balloons.iter_mut().find(|b| Some(b.id) == sel))
-                {
-                    egui::Grid::new("props")
-                        .num_columns(2)
-                        .spacing([8.0, 4.0])
-                        .show(ui, |ui| {
-                            ui.label("Id");
-                            ui.label(b.id.to_string());
-                            ui.end_row();
-                            ui.label("Kind");
-                            egui::ComboBox::from_id_salt("kind")
-                                .selected_text(b.kind.clone())
-                                .show_ui(ui, |ui| {
-                                    for k in ["dialogue", "aside", "caption"] {
-                                        changed |= ui
-                                            .selectable_value(&mut b.kind, k.to_string(), k)
-                                            .changed();
-                                    }
-                                });
-                            ui.end_row();
-                            ui.label("Role");
-                            egui::ComboBox::from_id_salt("role")
-                                .selected_text(b.role.clone())
-                                .show_ui(ui, |ui| {
-                                    for r in ROLES {
-                                        changed |= ui
-                                            .selectable_value(&mut b.role, r.to_string(), *r)
-                                            .changed();
-                                    }
-                                });
-                            ui.end_row();
-                            ui.label("Size (pt)");
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut b.size)
-                                        .range(0.0..=72.0)
-                                        .speed(0.25)
-                                        .suffix(" pt"),
-                                )
-                                .on_hover_text("0 = fit automatically")
-                                .changed();
-                            ui.end_row();
-                            ui.label("Box");
-                            ui.label(format!("{:?}", b.text_box));
-                            ui.end_row();
-                        });
-                    ui.label("Source");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::multiline(&mut b.source_text)
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed();
-                    ui.label("Translation");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::multiline(&mut b.text)
-                                .desired_rows(4)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed();
-                    ui.horizontal(|ui| {
-                        retranslate = ui.button("Retranslate").clicked();
-                        delete = ui.button("Delete").clicked();
-                    });
-                } else {
-                    ui.weak("Select a balloon, or use Draw balloon to add one.");
-                }
-                if changed {
-                    self.dirty = true;
-                }
-                if delete {
-                    self.delete_selected();
-                }
-                if retranslate {
-                    self.start_translate(sel);
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("props")
+                    .show(ui, |ui| self.properties(ui));
             });
-    }
-
-    fn canvas(&mut self, root: &mut egui::Ui) {
-        let ctx = &root.ctx().clone();
-        self.ensure_page_texture(ctx);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::CANVAS_BG)).show(root, |ui| {
-            let Some((_, tex)) = self.page_tex.clone() else {
-                ui.centered_and_justified(|ui| {
-                    ui.colored_label(Color32::WHITE, "Open a project, or File > Import chapter.");
-                });
-                return;
-            };
-            let Some(page) = self.cur_page().cloned() else { return };
-            let z = self.zoom;
-            egui::ScrollArea::both().id_salt("canvas").show(ui, |ui| {
-                let size = Vec2::new(page.width as f32 * z, page.height as f32 * z);
-                let (outer, _) = ui.allocate_exact_size(size + Vec2::splat(24.0), Sense::hover());
-                let rect = Rect::from_min_size(outer.min + Vec2::splat(12.0), size);
-                let resp = ui.interact(rect, ui.scope_id().with("page"), Sense::click_and_drag());
-                let p = ui.painter_at(outer);
-                p.rect_filled(rect.translate(Vec2::splat(3.0)), 0.0, theme::DARK);
-                p.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-                let to_screen = |b: [i32; 4]| {
-                    Rect::from_min_max(
-                        rect.min + Vec2::new(b[0] as f32, b[1] as f32) * z,
-                        rect.min + Vec2::new(b[2] as f32, b[3] as f32) * z,
-                    )
-                };
-                let to_page = |pos: Pos2| ((pos - rect.min) / z).round();
-
-                // Lettering preview: white fill over the source text, then the rendered English.
-                if self.show_text {
-                    for b in &page.balloons {
-                        if b.text.trim().is_empty() {
-                            continue;
-                        }
-                        let r = to_screen(b.text_box);
-                        p.rect_filled(r, 0.0, Color32::WHITE);
-                        if let Some((t, fits)) = self.lettering(ctx, b) {
-                            p.image(t.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-                            if !fits {
-                                p.rect_stroke(r, 0.0, Stroke::new(2.0, Color32::RED), egui::StrokeKind::Outside);
-                            }
-                        }
-                    }
-                }
-                if self.show_boxes {
-                    for s in &page.sfx {
-                        p.rect_stroke(to_screen(*s), 0.0, Stroke::new(1.5, Color32::from_rgb(0xb0, 0x00, 0x20)), egui::StrokeKind::Inside);
-                    }
-                    for b in &page.balloons {
-                        let r = to_screen(b.text_box);
-                        let sel = self.selected == Some(b.id);
-                        let col = if sel { Color32::from_rgb(0xff, 0x00, 0xff) } else if b.kind == "aside" { Color32::from_rgb(0xd0, 0x70, 0x00) } else { theme::ASAGI };
-                        p.rect_stroke(r, 0.0, Stroke::new(2.0, col), egui::StrokeKind::Outside);
-                        let tag = Rect::from_min_size(r.left_top() - Vec2::new(2.0, 16.0), Vec2::new(22.0, 15.0));
-                        p.rect_filled(tag, 0.0, col);
-                        p.text(tag.center(), egui::Align2::CENTER_CENTER, b.id.to_string(), egui::FontId::proportional(11.0), Color32::WHITE);
-                    }
-                }
-
-                match self.tool {
-                    Tool::Select => {
-                        if resp.clicked() {
-                            if let Some(pos) = resp.interact_pointer_pos() {
-                                let pp = to_page(pos);
-                                self.selected = page
-                                    .balloons
-                                    .iter()
-                                    .rev()
-                                    .find(|b| {
-                                        pp.x >= b.text_box[0] as f32 && pp.x <= b.text_box[2] as f32 && pp.y >= b.text_box[1] as f32 && pp.y <= b.text_box[3] as f32
-                                    })
-                                    .map(|b| b.id);
-                            }
-                        }
-                    }
-                    Tool::Draw => {
-                        if resp.drag_started() {
-                            self.drag_from = resp.interact_pointer_pos();
-                        }
-                        if let (Some(a), Some(b)) = (self.drag_from, ctx.pointer_latest_pos()) {
-                            p.rect_stroke(Rect::from_two_pos(a, b), 0.0, Stroke::new(1.0, Color32::BLACK), egui::StrokeKind::Inside);
-                        }
-                        if resp.drag_stopped() {
-                            if let (Some(a), Some(b)) = (self.drag_from.take(), ctx.pointer_latest_pos()) {
-                                let r = Rect::from_two_pos(a, b).intersect(rect);
-                                let (pa, pb) = (to_page(r.min), to_page(r.max));
-                                if r.width() > 6.0 && r.height() > 6.0 {
-                                    let idx = self.page;
-                                    if let Some(page) = self.manifest.as_mut().and_then(|m| m.pages.get_mut(idx)) {
-                                        let id = page.next_balloon_id();
-                                        page.balloons.push(Balloon {
-                                            id,
-                                            kind: "dialogue".into(),
-                                            text_box: [pa.x as i32, pa.y as i32, pb.x as i32, pb.y as i32],
-                                            bubble: None,
-                                            source_text: String::new(),
-                                            text: String::new(),
-                                            role: "dialogue".into(),
-                                            size: 0.0,
-                                        });
-                                        self.selected = Some(id);
-                                        self.dirty = true;
-                                        self.status = format!("Added balloon {id}; type its source text on the right");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        });
     }
 
     // ---------- dialogs ----------
@@ -1434,6 +1213,7 @@ impl eframe::App for AsagiApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         self.shortcuts(&ctx);
+        self.nudge(&ctx);
         self.title_bar(ui);
         self.menu_bar(ui);
         self.toolbar(ui);

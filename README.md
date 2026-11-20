@@ -4,12 +4,13 @@ AsagiType 2000 is a manga scanlation editor written in pure Rust, with a boxy Wi
 
 It runs as one native Windows app, built on egui/eframe and wgpu, like [PhotoCraft](https://github.com/storytold/photocraft). It needs no web view and no Python.
 
-## Status: v0.1 skeleton
+## Status: v0.3
 
 **Working:**
 - Import a chapter, either from a folder of pages or from a scanlation workspace (`series/<S>/chapters/<C>/source`), into a self-contained `.at2k` project.
 - Detect + OCR (F5) in pure Rust with [candle](https://github.com/huggingface/candle): the ogkalu RT-DETR v2 detector finds balloons and text, and manga-ocr reads the Japanese. Both run per page or for a whole chapter, on CPU. On test pages the output matches the Python models: the same 18 detections, and the same OCR tokens on 14 of 15 crops. A page takes about 5 seconds.
-- Page editor: adjust or draw balloon boxes, edit the source text, and set the role and size.
+- Page editor: Original and Translated panes side by side, sharing zoom and scroll. Drag a box to move it or use its 8 handles to resize it, and the lettering refits live. Arrow keys nudge the selected box 1 px, or 10 px with Shift. Draw new balloons and Ignore false hits.
+- Typography per balloon: font (overrides the role), size or Auto, bold, italic, case (UPPER, Title, lower) and alignment. Five style presets are stored in each project: click one to apply it, right-click to save the current style to it.
 - Translate a page (F6) with any OpenAI-compatible provider: DeepSeek (`deepseek-chat`, the default), OpenRouter, Ollama or LM Studio. API keys are kept in Windows Credential Manager.
 - Lettering preview through cosmic-text and tiny-skia. Text is fitted to the box at 168 DPI with a 16 px minimum line height, and anything that overflows is outlined in red.
 - Save (Ctrl+S). Help > About lists credits for every library, model, font and inspiration.

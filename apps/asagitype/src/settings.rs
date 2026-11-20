@@ -16,6 +16,8 @@ pub struct Settings {
     pub target_lang: String,
     /// Lettering role -> font family.
     pub role_fonts: BTreeMap<String, String>,
+    /// Typography presets copied into new projects.
+    pub presets: Vec<at2k::Preset>,
 }
 
 pub const ROLES: &[&str] = &[
@@ -50,6 +52,7 @@ impl Default for Settings {
             provider: ProviderConfig::default(),
             target_lang: "en".into(),
             role_fonts,
+            presets: at2k::default_presets(),
         }
     }
 }

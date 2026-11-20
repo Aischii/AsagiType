@@ -13,7 +13,8 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MANIFEST: &str = "manifest.json";
 pub const EXTENSION: &str = "at2k";
-pub const FORMAT_VERSION: u32 = 1;
+/// v2 adds typography, Ignore and presets. v1 files still open.
+pub const FORMAT_VERSION: u32 = 2;
 
 fn default_role() -> String {
     "dialogue".into()
@@ -39,6 +40,179 @@ pub struct Balloon {
     /// Point size at 168 DPI; 0 means fit automatically.
     #[serde(default)]
     pub size: f32,
+    /// Kept on the page but skipped by translate, clean and lettering (credits, false hits).
+    #[serde(default)]
+    pub ignore: bool,
+    /// Font family overriding the role's font.
+    #[serde(default)]
+    pub font: Option<String>,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub case: TextCase,
+    #[serde(default)]
+    pub align: Align,
+    /// Index of the preset last applied, for display only.
+    #[serde(default)]
+    pub preset: Option<u8>,
+}
+
+impl Balloon {
+    pub fn new(id: u32, kind: &str, text_box: [i32; 4]) -> Self {
+        Self {
+            id,
+            kind: kind.into(),
+            text_box,
+            bubble: None,
+            source_text: String::new(),
+            text: String::new(),
+            role: default_role(),
+            size: 0.0,
+            ignore: false,
+            font: None,
+            bold: false,
+            italic: false,
+            case: TextCase::default(),
+            align: Align::default(),
+            preset: None,
+        }
+    }
+
+    /// Copy a preset's typography onto this balloon.
+    pub fn apply_preset(&mut self, index: u8, p: &Preset) {
+        self.font = p.font.clone();
+        self.size = p.size;
+        self.bold = p.bold;
+        self.italic = p.italic;
+        self.case = p.case;
+        self.align = p.align;
+        self.preset = Some(index);
+    }
+
+    /// The text as it should be lettered.
+    pub fn display_text(&self) -> String {
+        self.case.apply(&self.text)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TextCase {
+    #[default]
+    AsTyped,
+    Upper,
+    Title,
+    Lower,
+}
+
+impl TextCase {
+    pub const ALL: [TextCase; 4] = [
+        TextCase::AsTyped,
+        TextCase::Upper,
+        TextCase::Title,
+        TextCase::Lower,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TextCase::AsTyped => "As typed",
+            TextCase::Upper => "UPPER",
+            TextCase::Title => "Title",
+            TextCase::Lower => "lower",
+        }
+    }
+
+    pub fn apply(self, text: &str) -> String {
+        match self {
+            TextCase::AsTyped => text.to_string(),
+            TextCase::Upper => text.to_uppercase(),
+            TextCase::Lower => text.to_lowercase(),
+            TextCase::Title => {
+                let mut out = String::with_capacity(text.len());
+                let mut start = true;
+                for c in text.chars() {
+                    if c.is_alphabetic() {
+                        if start {
+                            out.extend(c.to_uppercase());
+                        } else {
+                            out.extend(c.to_lowercase());
+                        }
+                        start = false;
+                    } else {
+                        out.push(c);
+                        // Apostrophes stay inside a word (DON'T -> Don't).
+                        start = !(c == '\'' || c == '\u{2019}');
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Align {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// A saved typography style; projects keep five.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Preset {
+    pub name: String,
+    #[serde(default)]
+    pub font: Option<String>,
+    #[serde(default)]
+    pub size: f32,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub case: TextCase,
+    #[serde(default)]
+    pub align: Align,
+}
+
+impl Preset {
+    pub fn from_balloon(name: &str, b: &Balloon) -> Self {
+        Self {
+            name: name.into(),
+            font: b.font.clone(),
+            size: b.size,
+            bold: b.bold,
+            italic: b.italic,
+            case: b.case,
+            align: b.align,
+        }
+    }
+}
+
+pub const PRESET_COUNT: usize = 5;
+
+/// Dialogue, shout, thought, narration and aside starting points.
+pub fn default_presets() -> Vec<Preset> {
+    let p = |name: &str, bold: bool, italic: bool, case: TextCase| Preset {
+        name: name.into(),
+        font: None,
+        size: 0.0,
+        bold,
+        italic,
+        case,
+        align: Align::Center,
+    };
+    vec![
+        p("Dialogue", false, false, TextCase::Upper),
+        p("Shout", true, false, TextCase::Upper),
+        p("Thought", false, true, TextCase::Upper),
+        p("Narration", false, false, TextCase::AsTyped),
+        p("Aside", false, true, TextCase::Upper),
+    ]
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -75,6 +249,9 @@ pub struct Manifest {
     pub glossary: String,
     #[serde(default)]
     pub rules: Vec<String>,
+    /// Five typography presets; empty in v1 files until the app seeds them.
+    #[serde(default)]
+    pub presets: Vec<Preset>,
     pub pages: Vec<Page>,
 }
 
@@ -152,6 +329,7 @@ pub struct NewProject {
     pub source_lang: String,
     pub target_lang: String,
     pub glossary: String,
+    pub presets: Vec<Preset>,
 }
 
 fn sanitize(s: &str) -> String {
@@ -229,6 +407,7 @@ pub fn create(out: &Path, meta: NewProject, images: &[PathBuf]) -> Result<Manife
         target_lang: meta.target_lang,
         glossary: meta.glossary,
         rules: default_rules(),
+        presets: meta.presets,
         pages,
     };
     zw.start_file(MANIFEST, SimpleFileOptions::default())?;
@@ -264,7 +443,11 @@ pub fn open(path: &Path) -> Result<Manifest> {
 }
 
 /// Rewrite the archive with a new manifest; other entries are copied raw.
+/// The file is written in the current format version.
 pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
+    let mut manifest = manifest.clone();
+    manifest.version = FORMAT_VERSION;
+    let manifest = &manifest;
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     {
         let mut za = ZipArchive::new(File::open(path)?)?;
@@ -387,22 +570,48 @@ mod tests {
             source_lang: "ja".into(),
             target_lang: "en".into(),
             glossary: String::new(),
+            presets: default_presets(),
         };
         let mut m = create(&out, meta, &[img]).unwrap();
         assert_eq!(m.pages[0].width, 1);
-        m.pages[0].balloons.push(Balloon {
-            id: 1,
-            kind: "dialogue".into(),
-            text_box: [0, 0, 1, 1],
-            bubble: None,
-            source_text: "こんにちは".into(),
-            text: "HELLO.".into(),
-            role: "dialogue".into(),
-            size: 0.0,
-        });
+        let mut b = Balloon::new(1, "dialogue", [0, 0, 1, 1]);
+        b.source_text = "こんにちは".into();
+        b.text = "hello.".into();
+        b.apply_preset(1, &m.presets[1]);
+        m.pages[0].balloons.push(b);
         save(&out, &m).unwrap();
-        assert_eq!(open(&out).unwrap(), m);
+        let back = open(&out).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(back.pages[0].balloons[0].display_text(), "HELLO.");
+        assert!(back.pages[0].balloons[0].bold);
         assert_eq!(read_entry(&out, "pages/001.png").unwrap(), png);
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+
+    #[test]
+    fn v1_balloon_gets_v2_defaults() {
+        let v1 = r#"{"id":3,"kind":"dialogue","text_box":[1,2,3,4],"text":"HI","role":"dialogue","size":0}"#;
+        let b: Balloon = serde_json::from_str(v1).unwrap();
+        assert!(!b.ignore && !b.bold && b.font.is_none());
+        assert_eq!((b.case, b.align), (TextCase::AsTyped, Align::Center));
+        let m: Manifest = serde_json::from_str(
+            r#"{"format":"at2k","version":1,"title":"t","series":"s","chapter":"c","source_lang":"ja","target_lang":"en","pages":[]}"#,
+        )
+        .unwrap();
+        assert!(m.presets.is_empty());
+    }
+
+    #[test]
+    fn title_case_keeps_apostrophes_inside_words() {
+        assert_eq!(
+            TextCase::Title.apply("DON'T GO, ONII-CHAN!"),
+            "Don't Go, Onii-Chan!"
+        );
+        assert_eq!(TextCase::Lower.apply("WAIT"), "wait");
     }
 }
