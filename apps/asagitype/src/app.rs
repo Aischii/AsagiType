@@ -15,7 +15,7 @@ use eframe::egui::{
     self, Color32, ColorImage, Key, Rect, Sense, TextureHandle, TextureOptions, Vec2,
     ViewportCommand,
 };
-use pipeline::AutoRun;
+use pipeline::{AutoRun, LiveClean};
 use provider::{BalloonIn, BalloonOut, PageRequest, PRESETS};
 use render::Renderer;
 use std::{
@@ -73,8 +73,11 @@ pub struct AsagiApp {
     job: Option<TranslateJob>,
     vision: Option<VisionWorker>,
     /// Clean layers produced since the last save, PNG by page index.
-    pending_clean: HashMap<usize, Vec<u8>>,
-    clean_tex: Option<(String, TextureHandle)>,
+    /// Clean layer of the current page, recomputed from the boxes after edits.
+    live: Option<LiveClean>,
+    clean_inflight: Option<u64>,
+    clean_wanted: Option<(u64, std::time::Instant)>,
+    show_mask: bool,
     auto: Option<AutoRun>,
     auto_all: bool,
     settings_form: SettingsForm,
@@ -113,8 +116,10 @@ impl AsagiApp {
             status,
             job: None,
             vision: None,
-            pending_clean: HashMap::new(),
-            clean_tex: None,
+            live: None,
+            clean_inflight: None,
+            clean_wanted: None,
+            show_mask: false,
             auto: None,
             auto_all: false,
             settings_form: SettingsForm::default(),
@@ -143,8 +148,8 @@ impl AsagiApp {
                 self.path = Some(path);
                 self.page = 0;
                 self.page_tex = None;
-                self.clean_tex = None;
-                self.pending_clean.clear();
+                self.live = None;
+                self.clean_wanted = None;
                 self.auto = None;
                 self.selected = None;
                 self.dirty = false;
@@ -157,14 +162,18 @@ impl AsagiApp {
         let (Some(path), Some(m)) = (&self.path, &self.manifest) else {
             return;
         };
-        let files: Vec<(String, Vec<u8>)> = self
-            .pending_clean
-            .iter()
-            .filter_map(|(i, png)| m.pages.get(*i).map(|p| (p.clean_entry_name(), png.clone())))
-            .collect();
-        match at2k::save_with_files(path, m, &files) {
+        // Clean layers are regenerated from the boxes, so stored 0.4 layers are dropped.
+        let mut m = m.clone();
+        for p in &mut m.pages {
+            p.clean = None;
+        }
+        match at2k::save(path, &m) {
             Ok(()) => {
-                self.pending_clean.clear();
+                if let Some(cur) = &mut self.manifest {
+                    for p in &mut cur.pages {
+                        p.clean = None;
+                    }
+                }
                 self.dirty = false;
                 self.status = format!("Saved {}", path.display());
                 self.refresh_projects();
@@ -363,6 +372,14 @@ impl AsagiApp {
         let Some(id) = self.selected else { return };
         let page = self.page;
         if let Some(m) = &mut self.manifest {
+            if m.pages[page]
+                .balloons
+                .iter()
+                .any(|b| b.id == id && b.locked)
+            {
+                self.status = "That box is locked.".into();
+                return;
+            }
             m.pages[page].balloons.retain(|b| b.id != id);
             self.selected = None;
             self.dirty = true;
@@ -497,21 +514,6 @@ impl AsagiApp {
                         self.detect_pages(ctx, vec![self.page], true);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Clean page"))
-                        .clicked()
-                    {
-                        self.clean_pages(ctx, vec![self.page]);
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Clean whole chapter"))
-                        .clicked()
-                    {
-                        let n = self.manifest.as_ref().map(|m| m.pages.len()).unwrap_or(0);
-                        self.clean_pages(ctx, (0..n).collect());
-                        ui.close();
-                    }
                     ui.separator();
                     if ui
                         .add_enabled(self.auto.is_none(), egui::Button::new("Auto: this page"))
@@ -557,6 +559,7 @@ impl AsagiApp {
                     ui.checkbox(&mut self.side_by_side, "Original | Translated side by side");
                     ui.checkbox(&mut self.show_text, "Show translation (single pane)");
                     ui.checkbox(&mut self.show_boxes, "Show boxes");
+                    ui.checkbox(&mut self.show_mask, "Show clean mask (red)");
                 });
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Settings...").clicked() {
@@ -653,13 +656,6 @@ impl AsagiApp {
                 {
                     let ctx = ui.ctx().clone();
                     self.detect_pages(&ctx, vec![self.page], false);
-                }
-                if ui
-                    .add_enabled(detecting == 0 && has_project, egui::Button::new("Clean"))
-                    .clicked()
-                {
-                    let ctx = ui.ctx().clone();
-                    self.clean_pages(&ctx, vec![self.page]);
                 }
                 let busy = self.job.is_some();
                 if ui
@@ -1210,8 +1206,9 @@ impl eframe::App for AsagiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_job();
-        self.poll_vision();
+        self.poll_vision(&ctx);
         self.step_auto(&ctx);
+        self.update_live_clean(&ctx);
         if self.job.is_some() || self.vision_busy() || self.auto.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }

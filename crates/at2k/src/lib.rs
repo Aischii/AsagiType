@@ -57,6 +57,21 @@ pub struct Balloon {
     /// Index of the preset last applied, for display only.
     #[serde(default)]
     pub preset: Option<u8>,
+    /// How the clean layer treats this balloon: Auto erases the source text inside the
+    /// existing bubble; a shape paints a new bubble with `fill` and `outline`.
+    #[serde(default)]
+    pub shape: BubbleShape,
+    /// Fill colour (RGBA). None: sampled from the page for Auto, white for shapes.
+    #[serde(default)]
+    pub fill: Option<[u8; 4]>,
+    #[serde(default)]
+    pub outline: Option<Outline>,
+    /// Hidden in the Translated pane and exports (Layers tab).
+    #[serde(default)]
+    pub hidden: bool,
+    /// Locked boxes cannot be moved, resized or deleted.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl Balloon {
@@ -77,6 +92,11 @@ impl Balloon {
             case: TextCase::default(),
             align: Align::default(),
             preset: None,
+            shape: BubbleShape::default(),
+            fill: None,
+            outline: None,
+            hidden: false,
+            locked: false,
         }
     }
 
@@ -150,6 +170,42 @@ impl TextCase {
             }
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BubbleShape {
+    /// Erase the source text inside the detected bubble.
+    #[default]
+    Auto,
+    Rect,
+    Rounded,
+    Ellipse,
+}
+
+impl BubbleShape {
+    pub const ALL: [BubbleShape; 4] = [
+        BubbleShape::Auto,
+        BubbleShape::Rect,
+        BubbleShape::Rounded,
+        BubbleShape::Ellipse,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BubbleShape::Auto => "Auto (erase)",
+            BubbleShape::Rect => "Rectangle",
+            BubbleShape::Rounded => "Rounded",
+            BubbleShape::Ellipse => "Ellipse",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Outline {
+    pub color: [u8; 4],
+    /// Width in page pixels.
+    pub width: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -633,6 +689,8 @@ mod v2_tests {
         let v1 = r#"{"id":3,"kind":"dialogue","text_box":[1,2,3,4],"text":"HI","role":"dialogue","size":0}"#;
         let b: Balloon = serde_json::from_str(v1).unwrap();
         assert!(!b.ignore && !b.bold && b.font.is_none());
+        assert!(!b.hidden && !b.locked && b.fill.is_none() && b.outline.is_none());
+        assert_eq!(b.shape, BubbleShape::Auto);
         assert_eq!((b.case, b.align), (TextCase::AsTyped, Align::Center));
         let m: Manifest = serde_json::from_str(
             r#"{"format":"at2k","version":1,"title":"t","series":"s","chapter":"c","source_lang":"ja","target_lang":"en","pages":[]}"#,

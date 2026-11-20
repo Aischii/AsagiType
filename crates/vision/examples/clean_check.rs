@@ -1,26 +1,40 @@
-//! Detect, then clean a page and write the result. Usage: clean_check <models dir> <image> <out.png>
+//! Detect, then clean a page and write the result.
+//! Usage: clean_check <models dir> <image> <out.png>
 use std::path::PathBuf;
-use vision::clean::{clean_page, composite, CleanBox};
+use vision::clean::{clean_page_full, composite, CleanBox};
 
 fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
     let models = vision::Models::load(&PathBuf::from(&a[1]))?;
     let img = image::open(&a[2])?;
-    let boxes: Vec<CleanBox> = models
-        .analyze(&img, 0.5)?
+    let regions = models.analyze(&img, 0.5)?;
+    let boxes: Vec<CleanBox> = regions
         .iter()
-        .map(|r| CleanBox {
-            text_box: r.text_box,
-            bubble: r.bubble,
-        })
+        .map(|r| CleanBox::auto(r.text_box, r.bubble))
         .collect();
     let t = std::time::Instant::now();
-    let layer = clean_page(&img.to_rgb8(), &boxes);
+    let res = clean_page_full(&img.to_rgb8(), &boxes);
     println!(
         "cleaned {} boxes in {} ms",
         boxes.len(),
         t.elapsed().as_millis()
     );
-    composite(&img.to_rgb8(), &layer).save(&a[3])?;
+    for (i, r) in regions.iter().enumerate() {
+        let tb = r.text_box;
+        let masked = (tb[1]..tb[3])
+            .flat_map(|y| (tb[0]..tb[2]).map(move |x| (x, y)))
+            .filter(|&(x, y)| res.mask.get_pixel(x as u32, y as u32)[0] > 0)
+            .count();
+        println!(
+            "{:>2} {:?} touch_up={} box={:?} masked={} {}",
+            i + 1,
+            res.methods[i],
+            res.touch_up[i],
+            tb,
+            masked,
+            r.source_text
+        );
+    }
+    composite(&img.to_rgb8(), &res.layer).save(&a[3])?;
     Ok(())
 }

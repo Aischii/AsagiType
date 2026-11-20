@@ -3,7 +3,7 @@
 
 use super::{AsagiApp, Tool};
 use crate::{settings::ROLES, theme};
-use at2k::{Align, Balloon, Preset, TextCase, PRESET_COUNT};
+use at2k::{Align, Balloon, BubbleShape, Outline, Preset, TextCase, PRESET_COUNT};
 use eframe::egui::{
     self, Color32, ColorImage, CursorIcon, Key, Pos2, Rect, Sense, Stroke, StrokeKind,
     TextureHandle, TextureOptions, Vec2,
@@ -208,7 +208,7 @@ impl AsagiApp {
         let Some((w, h)) = self.cur_page().map(|p| (p.width as i32, p.height as i32)) else {
             return;
         };
-        if let Some(b) = self.balloon_mut(id) {
+        if let Some(b) = self.balloon_mut(id).filter(|b| !b.locked) {
             b.text_box = moved(b.text_box, dx, dy, w, h);
             self.dirty = true;
         }
@@ -295,21 +295,28 @@ impl AsagiApp {
                     };
 
                     // Lettering on the translated pane: white fill over the source text, then the English.
-                    let clean = self.clean_texture(ctx);
+                    let clean = self.live_clean().map(|l| l.tex.clone());
+                    let mask = self
+                        .live_clean()
+                        .filter(|_| self.show_mask)
+                        .map(|l| l.mask_tex.clone());
+                    let touch_up: Vec<u32> = self
+                        .live_clean()
+                        .map(|l| l.touch_up.clone())
+                        .unwrap_or_default();
                     for &(rect, translated) in &layout {
                         if !translated {
                             continue;
                         }
+                        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
                         if let Some(c) = &clean {
-                            p.image(
-                                c.id(),
-                                rect,
-                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
+                            p.image(c.id(), rect, uv, Color32::WHITE);
+                        }
+                        if let Some(m) = &mask {
+                            p.image(m.id(), rect, uv, Color32::WHITE);
                         }
                         for b in &page.balloons {
-                            if b.ignore || b.text.trim().is_empty() {
+                            if b.ignore || b.hidden || b.text.trim().is_empty() {
                                 continue;
                             }
                             let r = to_screen(rect, b.text_box);
@@ -350,6 +357,8 @@ impl AsagiApp {
                                 SELECT
                             } else if b.ignore {
                                 IGNORED
+                            } else if touch_up.contains(&b.id) {
+                                super::pipeline::TOUCH_UP
                             } else if b.kind == "aside" {
                                 Color32::from_rgb(0xd0, 0x70, 0x00)
                             } else {
@@ -477,7 +486,7 @@ impl AsagiApp {
                                 let d = (now - from) / z;
                                 let nb =
                                     moved(start, d.x.round() as i32, d.y.round() as i32, pw, ph);
-                                if let Some(b) = self.balloon_mut(id) {
+                                if let Some(b) = self.balloon_mut(id).filter(|b| !b.locked) {
                                     if b.text_box != nb {
                                         b.text_box = nb;
                                         self.dirty = true;
@@ -491,7 +500,7 @@ impl AsagiApp {
                                 edges,
                             }) => {
                                 let nb = resized(start, edges, (now - from) / z, pw, ph);
-                                if let Some(b) = self.balloon_mut(id) {
+                                if let Some(b) = self.balloon_mut(id).filter(|b| !b.locked) {
                                     if b.text_box != nb {
                                         b.text_box = nb;
                                         self.dirty = true;
@@ -575,6 +584,7 @@ impl AsagiApp {
             ui.horizontal(|ui| {
                 ui.label(b.id.to_string());
                 ui.checkbox(&mut b.ignore, "Ignore").on_hover_text("Keep the box but skip it when translating and lettering (credits, false hits)");
+                ui.checkbox(&mut b.locked, "Lock").on_hover_text("Locked boxes cannot be moved, resized or deleted");
             });
             ui.end_row();
             ui.label("Kind");
@@ -686,6 +696,49 @@ impl AsagiApp {
                 });
                 ui.end_row();
             });
+
+        theme::caption(ui, "Bubble");
+        egui::Grid::new("bubble").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label("Shape");
+            egui::ComboBox::from_id_salt("shape").selected_text(b.shape.label()).show_ui(ui, |ui| {
+                for sh in BubbleShape::ALL {
+                    ui.selectable_value(&mut b.shape, sh, sh.label());
+                }
+            })
+            .response
+            .on_hover_text("Auto erases the text inside the existing bubble; a shape paints a new bubble");
+            ui.end_row();
+            ui.label("Fill");
+            ui.horizontal(|ui| {
+                let mut custom = b.fill.is_some();
+                let auto_label = if b.shape == BubbleShape::Auto { "Custom (else sampled)" } else { "Custom (else white)" };
+                if ui.checkbox(&mut custom, auto_label).changed() {
+                    b.fill = custom.then_some([255, 255, 255, 255]);
+                }
+                if let Some(f) = &mut b.fill {
+                    let mut c = Color32::from_rgba_unmultiplied(f[0], f[1], f[2], f[3]);
+                    if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                        *f = c.to_array();
+                    }
+                }
+            });
+            ui.end_row();
+            ui.label("Outline");
+            ui.horizontal(|ui| {
+                let mut on = b.outline.is_some();
+                if ui.add_enabled(b.shape != BubbleShape::Auto, egui::Checkbox::new(&mut on, "")).changed() {
+                    b.outline = on.then_some(Outline { color: [0, 0, 0, 255], width: 3.0 });
+                }
+                if let Some(o) = &mut b.outline {
+                    let mut c = Color32::from_rgba_unmultiplied(o.color[0], o.color[1], o.color[2], o.color[3]);
+                    if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                        o.color = c.to_array();
+                    }
+                    ui.add(egui::DragValue::new(&mut o.width).range(0.5..=20.0).speed(0.1).suffix(" px"));
+                }
+            });
+            ui.end_row();
+        });
 
         ui.label("Source");
         ui.add(

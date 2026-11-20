@@ -59,14 +59,36 @@ Each change below comes with a test, and v1 files must still open.
 - The Auto button with This page / All pages scope, a progress dialog and Cancel.
 - The Ignore flag.
 
-### 0.5: panels
+### 0.5: live cleaning, content-aware fill and rotation
+
+Decided on 2026-11-20 after the owner tested 0.4. The owner found three problems:
+
+- Text on the sky was filled with one flat colour.
+- White rectangles covered art around captions.
+- The clean layer went stale: deleting a box did not bring the original pixels back.
+
+| Topic | Decision |
+| --- | --- |
+| Live cleaning | The auto clean layer is recomputed from the current boxes about 150 ms after any edit (delete, move, resize, Ignore, shape). Deleting a box restores the original there. The auto layer is regenerated on open and export, not stored. Healing-brush strokes (0.6) will go in a separate paint layer that is saved |
+| Mask | Inside a detected bubble with a plain interior, the whole interior is filled as before. On art, sky or screentone, only the text pixels plus a 2–3 px halo are masked |
+| Content-aware fill | Pure-Rust inpainting, chosen per area. Telea-style fast marching handles smooth areas (sky, gradients). Exemplar patch synthesis handles textured areas (screentone). LaMa comes later |
+| Rotation detection | A projection search over −45° to 45° in 1° steps, on a binarised crop that also handles white text on dark |
+| Rotation threshold | Detect + OCR measures every box. Angles under 3° count as level |
+| Rotation use | OCR runs on the straightened crop. English is lettered at the same angle. Cleaning follows the tilted text through the glyph mask. The editor box stays upright |
+| Bubble style | Per-balloon shape (Auto erase, rectangle, rounded or ellipse), fill colour and outline. A shape paints a new bubble on the clean layer |
+| Outline protection | A dark stroke is erased only if it lies wholly inside the text box plus 3 px. Strokes that cross the box edge are kept: bubble outlines, panel borders, art. This fixed an open bubble whose outline got erased |
+| Letters touching the outline | The merged stroke is kept and the box gets an amber "needs touch-up" mark. It is fixed with the healing brush in 0.6 |
+| Mask view | View > Show clean mask draws the pixels that will be erased in red |
+| Bubble segmentation | The Manga109 YOLO11n-seg balloon model, ported to candle, gives exact bubble masks that clip the interior fill. It was trained on Manga109, which is licensed for academic use only, so it is not bundled or released: the app loads it from the user's models folder and credits it in About. Without it, the stroke-protection rule applies |
+| Order | First stroke protection, live cleaning, the glyph mask, inpainting, rotation and the mask view. Then the segmentation model |
+
+### 0.6: panels
 
 - Page thumbnails with status tags.
-- Bubble fill, outline and shape controls.
 - Layers tab.
-- Healing brush: fill and clone stamp.
+- Healing brush: fill and clone stamp, on the saved paint layer.
 
-### 0.6: export
+### 0.7: export
 
 - JPG and CBZ export of the composited pages.
 - Layered PSD export: source, clean layer and editable text.

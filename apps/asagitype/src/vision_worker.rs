@@ -3,13 +3,12 @@
 
 use eframe::egui;
 use std::{
-    io::Cursor,
     path::PathBuf,
     sync::mpsc::{channel, Receiver, Sender},
     thread,
 };
 use vision::{
-    clean::{clean_page, CleanBox},
+    clean::{clean_page_full, CleanBox},
     Models, TextRegion,
 };
 
@@ -21,8 +20,12 @@ pub enum Request {
     },
     Clean {
         page: usize,
+        /// Signature of the box state being cleaned, echoed back.
+        sig: u64,
         bytes: Vec<u8>,
         boxes: Vec<CleanBox>,
+        /// Balloon id of each box, to report touch-ups.
+        ids: Vec<u32>,
     },
 }
 
@@ -31,8 +34,13 @@ pub enum Outcome {
         replace: bool,
         regions: Vec<TextRegion>,
     },
-    /// PNG-encoded RGBA clean layer.
-    Cleaned { png: Vec<u8> },
+    Cleaned {
+        sig: u64,
+        layer: image::RgbaImage,
+        mask: image::GrayImage,
+        /// Balloon ids that need a manual touch-up.
+        touch_up: Vec<u32>,
+    },
 }
 
 pub struct PageResult {
@@ -76,17 +84,30 @@ fn run(
             })();
             (page, result)
         }
-        Request::Clean { page, bytes, boxes } => {
+        Request::Clean {
+            page,
+            sig,
+            bytes,
+            boxes,
+            ids,
+        } => {
             let result = (|| {
                 let img = image::load_from_memory(&bytes)
                     .map_err(|e| e.to_string())?
                     .to_rgb8();
-                let layer = clean_page(&img, &boxes);
-                let mut png = Vec::new();
-                layer
-                    .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-                    .map_err(|e| e.to_string())?;
-                Ok(Outcome::Cleaned { png })
+                let res = clean_page_full(&img, &boxes);
+                let touch_up = ids
+                    .iter()
+                    .zip(&res.touch_up)
+                    .filter(|(_, t)| **t)
+                    .map(|(id, _)| *id)
+                    .collect();
+                Ok(Outcome::Cleaned {
+                    sig,
+                    layer: res.layer,
+                    mask: res.mask,
+                    touch_up,
+                })
             })();
             (page, result)
         }
