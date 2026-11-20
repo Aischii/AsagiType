@@ -1,0 +1,8 @@
+/target/
+*.at2k
+*.at2k.tmp
+/projects/
+/models/
+*.onnx
+*.safetensors
+*.pt

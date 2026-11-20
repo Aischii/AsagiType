@@ -1,0 +1,18 @@
+[package]
+name = "asagitype"
+description = "AsagiType 2000: pure-Rust manga scanlation editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+at2k.workspace = true
+provider.workspace = true
+render.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+rfd = "0.15"
+dirs = "6"

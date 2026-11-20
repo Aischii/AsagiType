@@ -1,0 +1,13 @@
+[package]
+name = "at2k"
+description = "AsagiType 2000 project format (.at2k)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+imagesize.workspace = true
