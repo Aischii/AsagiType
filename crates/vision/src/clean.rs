@@ -28,6 +28,10 @@ pub struct CleanBox {
     pub fill: Option<[u8; 3]>,
     /// Paint a new bubble instead of erasing.
     pub shape: Option<ShapeStyle>,
+    /// Text angle in degrees, clockwise. Tilted text is cleaned in its own straightened frame.
+    pub rotation: f32,
+    /// Text frame for tilted text as a fraction of the box [w, h]; None uses the box.
+    pub frame: Option<[f32; 2]>,
 }
 
 impl CleanBox {
@@ -37,6 +41,8 @@ impl CleanBox {
             bubble,
             fill: None,
             shape: None,
+            rotation: 0.0,
+            frame: None,
         }
     }
 }
@@ -135,6 +141,9 @@ pub fn clean_page_with_balloons(
                 paint_shape(b.text_box, &style, &mut res.layer, &mut res.mask);
                 (false, FillMethod::Shape)
             }
+            None if b.rotation.abs() >= MIN_TILT => {
+                clean_rotated(img, b, &mut res.layer, &mut res.mask)
+            }
             None => match balloon_for(&b.text_box, balloons) {
                 Some(bal) => clean_in_balloon(img, b, bal, &mut res.layer, &mut res.mask)
                     .unwrap_or_else(|| clean_auto(img, b, &mut res.layer, &mut res.mask)),
@@ -145,6 +154,191 @@ pub fn clean_page_with_balloons(
         res.methods.push(method);
     }
     res
+}
+
+/// Tilts below this are cleaned upright.
+const MIN_TILT: f32 = 1.0;
+/// Margin around the straightened text frame, so the paper around the letters is sampled.
+const FRAME_PAD: f32 = 4.0;
+
+/// Clean tilted text in its own frame: straighten the area around the box, clean the level
+/// text frame there, then map the erased pixels back. Cleaning the upright box instead mixes
+/// the tilted strip with the art around it, which picks the wrong ink polarity.
+fn clean_rotated(
+    img: &RgbImage,
+    cb: &CleanBox,
+    layer: &mut RgbaImage,
+    mask_out: &mut GrayImage,
+) -> (bool, FillMethod) {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let t = clamp_box(cb.text_box, w, h);
+    let region = clamp_box(grow(t, CONTEXT), w, h);
+    let (rw, rh) = (region[2] - region[0], region[3] - region[1]);
+    if t[2] - t[0] < 3 || t[3] - t[1] < 3 || rw < 3 || rh < 3 {
+        return (false, FillMethod::Nothing);
+    }
+    let crop =
+        image::imageops::crop_imm(img, region[0] as u32, region[1] as u32, rw as u32, rh as u32)
+            .to_image();
+    let straight = crate::rotation::straighten(&crop, cb.rotation);
+    let (s, c) = cb.rotation.to_radians().sin_cos();
+    let (cx, cy) = (rw as f32 / 2.0, rh as f32 / 2.0);
+    let (ncx, ncy) = (straight.width() as f32 / 2.0, straight.height() as f32 / 2.0);
+    // Crop pixel centre -> straightened coordinates (inverse of `straighten`'s mapping).
+    let fwd = |x: f32, y: f32| {
+        let (ux, uy) = (x - cx, y - cy);
+        (c * ux + s * uy + ncx, -s * ux + c * uy + ncy)
+    };
+    let (bw, bh) = ((t[2] - t[0]) as f32, (t[3] - t[1]) as f32);
+    let [fx, fy] = cb.frame.unwrap_or([1.0, 1.0]);
+    let (fw, fh) = (fx * bw + 2.0 * FRAME_PAD, fy * bh + 2.0 * FRAME_PAD);
+    let (mx, my) = fwd(
+        (t[0] + t[2]) as f32 / 2.0 - region[0] as f32,
+        (t[1] + t[3]) as f32 / 2.0 - region[1] as f32,
+    );
+    let approx = [
+        (mx - fw / 2.0).floor() as i32,
+        (my - fh / 2.0).floor() as i32,
+        (mx + fw / 2.0).ceil() as i32,
+        (my + fh / 2.0).ceil() as i32,
+    ];
+    // Tilted captions usually sit on a strip of paper over the art: clean just that strip.
+    let band = paper_band(&straight, approx);
+    let frame = band.map(|(r, _)| r).unwrap_or(approx);
+    let inner = CleanBox {
+        text_box: frame,
+        bubble: None,
+        // A strip of paper is flat: fill it with its own tone, never with the art around it.
+        fill: cb.fill.or(band.map(|(_, paper)| paper)),
+        shape: None,
+        rotation: 0.0,
+        frame: None,
+    };
+    let res = clean_page_full(&straight, &[inner]);
+    let (sw, sh) = (straight.width() as i32, straight.height() as i32);
+    for y in region[1]..region[3] {
+        for x in region[0]..region[2] {
+            let (sx, sy) = fwd(
+                (x - region[0]) as f32 + 0.5,
+                (y - region[1]) as f32 + 0.5,
+            );
+            let (sx, sy) = (sx.floor() as i32, sy.floor() as i32);
+            if sx < 0 || sy < 0 || sx >= sw || sy >= sh {
+                continue;
+            }
+            if res.mask.get_pixel(sx as u32, sy as u32).0[0] == 0 {
+                continue;
+            }
+            let p = res.layer.get_pixel(sx as u32, sy as u32);
+            if p.0[3] == 0 {
+                continue;
+            }
+            layer.put_pixel(x as u32, y as u32, Rgba([p.0[0], p.0[1], p.0[2], 255]));
+            mask_out.put_pixel(x as u32, y as u32, Luma([255]));
+        }
+    }
+    (res.touch_up[0], res.methods[0])
+}
+
+/// In a straightened crop, the strip of paper that carries the text line through the middle
+/// of `approx`: rows and columns, grown out from the centre, in which at least a third of the
+/// pixels have the paper's tone. Once a row of plain paper (the strip's margin) is reached, growth
+/// continues only through plain paper, so it stops at the strip's edge rather than running into
+/// light art beside it. Returns the strip and the paper colour; None when no clear strip is found.
+fn paper_band(img: &RgbImage, approx: [i32; 4]) -> Option<([i32; 4], [u8; 3])> {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let a = clamp_box(approx, w, h);
+    if a[2] - a[0] < 8 || a[3] - a[1] < 8 {
+        return None;
+    }
+    let cy = (a[1] + a[3]) / 2;
+    let (iw0, iw1) = (a[0] + (a[2] - a[0]) / 10, a[2] - (a[2] - a[0]) / 10);
+    // Candidate paper tones: the most common tones along the text line. Dense lettering can
+    // outnumber the paper there, so each is tried and only one with plain margins is accepted.
+    let mut bins = [0u32; 16];
+    let mut sums = [0f32; 16];
+    for y in (cy - 2).max(0)..=(cy + 2).min(h - 1) {
+        for x in iw0..iw1 {
+            let v = lum(img.get_pixel(x as u32, y as u32));
+            let k = ((v / 16.0) as usize).min(15);
+            bins[k] += 1;
+            sums[k] += v;
+        }
+    }
+    let mut order: Vec<usize> = (0..16).filter(|&k| bins[k] > 0).collect();
+    order.sort_by_key(|&k| std::cmp::Reverse(bins[k]));
+    order
+        .into_iter()
+        .take(3)
+        .find_map(|k| band_for_tone(img, a, cy, sums[k] / bins[k] as f32))
+}
+
+fn band_for_tone(img: &RgbImage, a: [i32; 4], cy: i32, paper: f32) -> Option<([i32; 4], [u8; 3])> {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let l = |x: i32, y: i32| lum(img.get_pixel(x as u32, y as u32));
+    let is_paper = |x: i32, y: i32| (l(x, y) - paper).abs() < 48.0;
+    const MIN_FRAC: f32 = 0.35;
+    const MARGIN_FRAC: f32 = 0.9;
+    let (iw0, iw1) = (a[0] + (a[2] - a[0]) / 10, a[2] - (a[2] - a[0]) / 10);
+    let row_frac = |y: i32| {
+        let n = (iw0..iw1).filter(|&x| is_paper(x, y)).count();
+        n as f32 / (iw1 - iw0).max(1) as f32
+    };
+    if row_frac(cy) < MIN_FRAC {
+        return None;
+    }
+    let limit = CONTEXT * 2;
+    let grow_rows = |step: i32, stop: i32| {
+        let (mut y, mut in_margin) = (cy, false);
+        while y != stop {
+            let f = row_frac(y + step);
+            if f < if in_margin { MARGIN_FRAC } else { MIN_FRAC } {
+                break;
+            }
+            in_margin |= f >= MARGIN_FRAC;
+            y += step;
+        }
+        (y, in_margin)
+    };
+    let (top, m_top) = grow_rows(-1, (a[1] - limit).max(0));
+    let (bot, m_bot) = grow_rows(1, (a[3] + limit).min(h - 1));
+    // Paper has plain margins around the text; a run of ink or art does not.
+    if !m_top && !m_bot {
+        return None;
+    }
+    let col_ok = |x: i32| {
+        let n = (top..=bot).filter(|&y| is_paper(x, y)).count();
+        n as f32 >= MIN_FRAC * (bot - top + 1) as f32
+    };
+    let cx = (a[0] + a[2]) / 2;
+    let (mut left, mut right) = (cx, cx);
+    while left > (a[0] - limit).max(0) && col_ok(left - 1) {
+        left -= 1;
+    }
+    while right < (a[2] + limit).min(w - 1) && col_ok(right + 1) {
+        right += 1;
+    }
+    // A strip covering the whole search area is not a strip: let the caller decide.
+    let tall = bot - top + 1;
+    if tall < 8 || tall >= (a[3] - a[1]) + 2 * limit - 2 || right - left < 8 {
+        return None;
+    }
+    let mut ch: [Vec<u8>; 3] = Default::default();
+    for y in top..=bot {
+        for x in left..=right {
+            if is_paper(x, y) {
+                let p = img.get_pixel(x as u32, y as u32);
+                for k in 0..3 {
+                    ch[k].push(p[k]);
+                }
+            }
+        }
+    }
+    let colour = std::array::from_fn(|k| {
+        ch[k].sort_unstable();
+        ch[k].get(ch[k].len() / 2).copied().unwrap_or(255)
+    });
+    Some(([left, top, right + 1, bot + 1], colour))
 }
 
 /// Pixels shaved off the balloon mask so the outline is never painted.
@@ -1655,6 +1849,8 @@ mod tests {
             outline: Some(([0, 0, 0, 255], 3.0)),
         };
         let boxes = [CleanBox {
+            rotation: 0.0,
+            frame: None,
             text_box: [30, 20, 90, 60],
             bubble: None,
             fill: None,
@@ -1712,5 +1908,68 @@ mod balloon_tests {
             [150, 150, 150],
             "outside untouched"
         );
+    }
+
+    #[test]
+    fn tilted_caption_strip_over_dark_art_is_cleaned_in_its_frame() {
+        // A white strip tilted up to the right on black, with dark letters along it and a light
+        // shoe sole just above it. Its upright box is mostly black art.
+        let (a, c) = (11f32.to_radians(), (120.0f32, 80.0f32));
+        let u = (a.cos(), -a.sin());
+        let n = (a.sin(), a.cos());
+        let along = |x: u32, y: u32| (x as f32 - c.0) * u.0 + (y as f32 - c.1) * u.1;
+        let across = |x: u32, y: u32| (x as f32 - c.0) * n.0 + (y as f32 - c.1) * n.1;
+        let in_strip = |x: u32, y: u32| along(x, y).abs() <= 100.0 && across(x, y).abs() <= 15.0;
+        let in_letter = |x: u32, y: u32| {
+            let t = along(x, y) + 90.0;
+            across(x, y).abs() <= 6.0 && t >= 0.0 && t <= 180.0 && t % 20.0 < 12.0
+        };
+        let sole = |x: u32, y: u32| (60..90).contains(&x) && (78..84).contains(&y) && across(x, y) < -19.0;
+        let img = RgbImage::from_fn(240, 160, |x, y| {
+            if in_letter(x, y) {
+                Rgb([20, 20, 20])
+            } else if in_strip(x, y) {
+                Rgb([240, 240, 240])
+            } else if sole(x, y) {
+                Rgb([225, 225, 225])
+            } else {
+                Rgb([0, 0, 0])
+            }
+        });
+        let pts: Vec<(u32, u32)> = (0..240)
+            .flat_map(|x| (0..160).map(move |y| (x, y)))
+            .filter(|&(x, y)| in_strip(x, y))
+            .collect();
+        let bx = |f: fn(&(u32, u32)) -> u32| pts.iter().map(f);
+        let tb = [
+            bx(|p| p.0).min().unwrap() as i32,
+            bx(|p| p.1).min().unwrap() as i32,
+            bx(|p| p.0).max().unwrap() as i32 + 1,
+            bx(|p| p.1).max().unwrap() as i32 + 1,
+        ];
+        let crop = image::imageops::crop_imm(&img, tb[0] as u32, tb[1] as u32, (tb[2] - tb[0]) as u32, (tb[3] - tb[1]) as u32).to_image();
+        let angle = crate::rotation::estimate(&crop);
+        assert!((angle.degrees.abs() - 11.0).abs() <= 2.0, "angle {}", angle.degrees);
+        let mut cb = CleanBox::auto(tb, None);
+        cb.rotation = angle.degrees;
+        let r = clean_page_full(&img, &[cb]);
+        let out = composite(&img, &r.layer);
+        let mut left = 0;
+        for (x, y) in pts.iter().copied().filter(|&(x, y)| in_letter(x, y)) {
+            if lum(out.get_pixel(x, y)) < 160.0 {
+                left += 1;
+            }
+        }
+        assert_eq!(left, 0, "letter pixels left");
+        for y in 0..160 {
+            for x in 0..240 {
+                if sole(x, y) {
+                    assert_eq!(out.get_pixel(x, y), img.get_pixel(x, y), "sole at {x},{y}");
+                }
+                if !in_strip(x, y) && across(x, y).abs() > 18.0 {
+                    assert_eq!(out.get_pixel(x, y), img.get_pixel(x, y), "art at {x},{y}");
+                }
+            }
+        }
     }
 }

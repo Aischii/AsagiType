@@ -1,6 +1,7 @@
 //! Main window: title bar, menus, toolbar, project/page lists, canvas, balloon panel, dialogs.
 
 mod editor;
+mod history;
 mod pipeline;
 
 use crate::vision_worker::VisionWorker;
@@ -11,6 +12,7 @@ use crate::{
 };
 use at2k::Manifest;
 use editor::Drag;
+use history::{History, PaintLayers};
 use eframe::egui::{
     self, Color32, ColorImage, Key, Rect, Sense, TextureHandle, TextureOptions, Vec2,
     ViewportCommand,
@@ -19,7 +21,7 @@ use pipeline::{AutoRun, LiveClean};
 use provider::{BalloonIn, BalloonOut, PageRequest, PRESETS};
 use render::Renderer;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::mpsc::{channel, Receiver},
 };
@@ -84,6 +86,11 @@ pub struct AsagiApp {
     import_form: ImportForm,
     about_open: bool,
     message: Option<(String, bool)>,
+    history: History,
+    /// Healing-brush layers loaded or painted this session, by page index.
+    paint: PaintLayers,
+    /// Pages whose paint layer changed since the last save.
+    paint_dirty: HashSet<usize>,
 }
 
 impl AsagiApp {
@@ -126,6 +133,9 @@ impl AsagiApp {
             import_form: ImportForm::default(),
             about_open: false,
             message: None,
+            history: History::default(),
+            paint: PaintLayers::new(),
+            paint_dirty: HashSet::new(),
         };
         app.refresh_projects();
         app
@@ -142,8 +152,15 @@ impl AsagiApp {
 
     fn open_project(&mut self, path: PathBuf) {
         match at2k::open(&path) {
-            Ok(m) => {
+            Ok(mut m) => {
                 self.status = format!("Opened {}", m.title);
+                // Clean layers are regenerated from the boxes, so stored 0.4 layers are dropped.
+                for p in &mut m.pages {
+                    p.clean = None;
+                }
+                self.history.reset(&m.pages);
+                self.paint.clear();
+                self.paint_dirty.clear();
                 self.manifest = Some(m);
                 self.path = Some(path);
                 self.page = 0;
@@ -162,18 +179,37 @@ impl AsagiApp {
         let (Some(path), Some(m)) = (&self.path, &self.manifest) else {
             return;
         };
-        // Clean layers are regenerated from the boxes, so stored 0.4 layers are dropped.
         let mut m = m.clone();
-        for p in &mut m.pages {
-            p.clean = None;
+        let mut files = Vec::new();
+        for &i in &self.paint_dirty {
+            let (Some(page), Some(layer)) = (m.pages.get_mut(i), self.paint.get(&i)) else {
+                continue;
+            };
+            if layer.pixels().any(|p| p.0[3] > 0) {
+                let mut png = Vec::new();
+                if let Err(e) =
+                    layer.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                {
+                    let msg = format!("Could not encode paint layer:\n{e:#}");
+                    self.error(msg);
+                    return;
+                }
+                let name = page.paint_entry_name();
+                page.paint = Some(name.clone());
+                files.push((name, png));
+            } else {
+                page.paint = None;
+            }
         }
-        match at2k::save(path, &m) {
+        let path = path.clone();
+        match at2k::save_with_files(&path, &m, &files) {
             Ok(()) => {
                 if let Some(cur) = &mut self.manifest {
-                    for p in &mut cur.pages {
-                        p.clean = None;
+                    for (cur, saved) in cur.pages.iter_mut().zip(&m.pages) {
+                        cur.paint = saved.paint.clone();
                     }
                 }
+                self.paint_dirty.clear();
                 self.dirty = false;
                 self.status = format!("Saved {}", path.display());
                 self.refresh_projects();
@@ -234,6 +270,63 @@ impl AsagiApp {
             }
             Err(e) => self.error(format!("Import failed:\n{e:#}")),
         }
+    }
+
+    /// Load a page's saved paint layer, or start an empty one. Returns false on read errors.
+    #[allow(dead_code)] // used by the healing brush (0.6 part 4)
+    fn ensure_paint(&mut self, index: usize) -> bool {
+        if self.paint.contains_key(&index) {
+            return true;
+        }
+        let page = self.manifest.as_ref().and_then(|m| m.pages.get(index)).cloned();
+        let (Some(path), Some(page)) = (self.path.clone(), page) else {
+            return false;
+        };
+        let layer = match &page.paint {
+            Some(entry) => match at2k::read_entry(&path, entry)
+                .and_then(|b| Ok(image::load_from_memory(&b)?.to_rgba8()))
+            {
+                Ok(img) => img,
+                Err(e) => {
+                    self.error(format!("Could not read paint layer of {}:\n{e:#}", page.id));
+                    return false;
+                }
+            },
+            None => image::RgbaImage::new(page.width, page.height),
+        };
+        self.paint.insert(index, layer);
+        true
+    }
+
+    /// True while a drag, a held mouse button or a focused text field may still change the page.
+    fn gesture_active(&self, ctx: &egui::Context) -> bool {
+        self.drag.is_some() || ctx.egui_wants_keyboard_input() || ctx.input(|i| i.pointer.any_down())
+    }
+
+    fn record_history(&mut self, ctx: &egui::Context) {
+        let hold = self.gesture_active(ctx).then_some(self.page);
+        if let Some(m) = &self.manifest {
+            self.history.observe(&m.pages, hold);
+        }
+    }
+
+    fn undo_redo(&mut self, redo: bool) {
+        let Some(m) = &mut self.manifest else { return };
+        let changed = if redo {
+            self.history.redo(&mut m.pages, &mut self.paint)
+        } else {
+            self.history.undo(&mut m.pages, &mut self.paint)
+        };
+        let Some(page) = changed else { return };
+        self.paint_dirty.insert(page);
+        self.page = page;
+        let ids: Vec<u32> = m.pages[page].balloons.iter().map(|b| b.id).collect();
+        if self.selected.is_some_and(|id| !ids.contains(&id)) {
+            self.selected = None;
+        }
+        self.drag = None;
+        self.dirty = true;
+        self.status = if redo { "Redo" } else { "Undo" }.into();
     }
 
     fn cur_page(&self) -> Option<&at2k::Page> {
@@ -490,6 +583,22 @@ impl AsagiApp {
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     }
                 });
+                ui.menu_button("Edit", |ui| {
+                    if ui
+                        .add_enabled(self.history.can_undo(), egui::Button::new("Undo  (Ctrl+Z)"))
+                        .clicked()
+                    {
+                        self.undo_redo(false);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(self.history.can_redo(), egui::Button::new("Redo  (Ctrl+Y)"))
+                        .clicked()
+                    {
+                        self.undo_redo(true);
+                        ui.close();
+                    }
+                });
                 ui.menu_button("Page", |ui| {
                     let busy = self.vision.as_ref().is_some_and(|v| v.pending > 0);
                     if ui
@@ -611,8 +720,10 @@ impl AsagiApp {
                     self.go_page(self.page as isize + 1);
                 }
                 ui.separator();
-                ui.selectable_value(&mut self.tool, Tool::Select, "Select");
-                ui.selectable_value(&mut self.tool, Tool::Draw, "Draw balloon");
+                ui.selectable_value(&mut self.tool, Tool::Select, "Select")
+                    .on_hover_text("V");
+                ui.selectable_value(&mut self.tool, Tool::Draw, "Draw balloon")
+                    .on_hover_text("D");
                 ui.separator();
                 let has_project = self.manifest.is_some();
                 if ui
@@ -1155,7 +1266,31 @@ impl AsagiApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let typing = ctx.memory(|m| m.focused().is_some());
+        let typing = ctx.egui_wants_keyboard_input();
+        if !typing {
+            let (undo, redo, select, draw) = ctx.input_mut(|i| {
+                let redo = i.consume_key(egui::Modifiers::COMMAND, Key::Y)
+                    || i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::Z);
+                (
+                    i.consume_key(egui::Modifiers::COMMAND, Key::Z),
+                    redo,
+                    i.consume_key(egui::Modifiers::NONE, Key::V),
+                    i.consume_key(egui::Modifiers::NONE, Key::D),
+                )
+            });
+            if undo {
+                self.undo_redo(false);
+            }
+            if redo {
+                self.undo_redo(true);
+            }
+            if select {
+                self.tool = Tool::Select;
+            }
+            if draw {
+                self.tool = Tool::Draw;
+            }
+        }
         let (save, f5, f6, pgdn, pgup, del, esc) = ctx.input(|i| {
             (
                 i.modifiers.ctrl && i.key_pressed(Key::S),
@@ -1222,6 +1357,7 @@ impl eframe::App for AsagiApp {
         self.right_panel(ui);
         self.canvas(ui);
         self.dialogs(&ctx);
+        self.record_history(&ctx);
         self.auto_dialog(&ctx);
     }
 }

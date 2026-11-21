@@ -14,7 +14,7 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 pub const MANIFEST: &str = "manifest.json";
 pub const EXTENSION: &str = "at2k";
 /// v2 adds typography, Ignore and presets. v1 files still open.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 fn default_role() -> String {
     "dialogue".into()
@@ -78,6 +78,9 @@ pub struct Balloon {
     /// Lettering frame for rotated text as a fraction of the box [w, h]; None uses the box.
     #[serde(default)]
     pub frame: Option<[f32; 2]>,
+    /// The amber "needs touch-up" mark was dealt with (painted over or marked fixed).
+    #[serde(default)]
+    pub touch_fixed: bool,
 }
 
 impl Balloon {
@@ -105,6 +108,7 @@ impl Balloon {
             locked: false,
             rotation: 0.0,
             frame: None,
+            touch_fixed: false,
         }
     }
 
@@ -295,11 +299,18 @@ pub struct Page {
     /// Archive entry of the clean layer (`clean/<id>.png`, RGBA, page size), once cleaned.
     #[serde(default)]
     pub clean: Option<String>,
+    /// Archive entry of the healing-brush paint layer (`paint/<id>.png`, RGBA, page size).
+    #[serde(default)]
+    pub paint: Option<String>,
 }
 
 impl Page {
     pub fn clean_entry_name(&self) -> String {
         format!("clean/{}.png", self.id)
+    }
+
+    pub fn paint_entry_name(&self) -> String {
+        format!("paint/{}.png", self.id)
     }
 }
 
@@ -325,7 +336,37 @@ pub struct Manifest {
     /// Five typography presets; empty in v1 files until the app seeds them.
     #[serde(default)]
     pub presets: Vec<Preset>,
+    /// Layers tab visibility and opacity. View only: exports always use every layer.
+    #[serde(default)]
+    pub view: LayerView,
     pub pages: Vec<Page>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct LayerState {
+    pub visible: bool,
+    /// 0.0 to 1.0.
+    pub opacity: f32,
+}
+
+impl Default for LayerState {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            opacity: 1.0,
+        }
+    }
+}
+
+/// The fixed layer stack, bottom to top.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct LayerView {
+    pub source: LayerState,
+    pub clean: LayerState,
+    pub paint: LayerState,
+    pub text: LayerState,
 }
 
 pub fn default_rules() -> Vec<String> {
@@ -469,6 +510,7 @@ pub fn create(out: &Path, meta: NewProject, images: &[PathBuf]) -> Result<Manife
             sfx: vec![],
             raw_only: false,
             clean: None,
+            paint: None,
         });
     }
     let manifest = Manifest {
@@ -482,6 +524,7 @@ pub fn create(out: &Path, meta: NewProject, images: &[PathBuf]) -> Result<Manife
         glossary: meta.glossary,
         rules: default_rules(),
         presets: meta.presets,
+        view: LayerView::default(),
         pages,
     };
     zw.start_file(MANIFEST, SimpleFileOptions::default())?;
@@ -537,7 +580,11 @@ pub fn save_with_files(
         let mut zw = ZipWriter::new(File::create(&tmp)?);
         for i in 0..za.len() {
             let f = za.by_index_raw(i)?;
-            if f.name() != MANIFEST && !files.iter().any(|(n, _)| n == f.name()) {
+            let orphan = (f.name().starts_with("paint/") || f.name().starts_with("clean/"))
+                && !manifest.pages.iter().any(|p| {
+                    p.paint.as_deref() == Some(f.name()) || p.clean.as_deref() == Some(f.name())
+                });
+            if f.name() != MANIFEST && !orphan && !files.iter().any(|(n, _)| n == f.name()) {
                 zw.raw_copy_file(f)?;
             }
         }
@@ -684,6 +731,22 @@ mod tests {
             Some("clean/001.png")
         );
         assert_eq!(read_entry(&out, "pages/001.png").unwrap(), png);
+        // Paint layers are stored, and dropped once no page refers to them.
+        let mut m3 = open(&out).unwrap();
+        let paint = m3.pages[0].paint_entry_name();
+        m3.pages[0].paint = Some(paint.clone());
+        m3.view.paint.opacity = 0.5;
+        save_with_files(&out, &m3, &[(paint.clone(), vec![9])]).unwrap();
+        let back3 = open(&out).unwrap();
+        assert_eq!(back3.pages[0].paint.as_deref(), Some("paint/001.png"));
+        assert_eq!(back3.view.paint.opacity, 0.5);
+        assert_eq!(read_entry(&out, &paint).unwrap(), vec![9]);
+        m3.pages[0].paint = None;
+        m3.pages[0].clean = None;
+        save(&out, &m3).unwrap();
+        assert!(read_entry(&out, &paint).is_err());
+        assert!(read_entry(&out, &name).is_err());
+        assert_eq!(read_entry(&out, "pages/001.png").unwrap(), png);
         fs::remove_dir_all(&dir).unwrap();
     }
 }
@@ -706,6 +769,9 @@ mod v2_tests {
         )
         .unwrap();
         assert!(m.presets.is_empty());
+        assert_eq!(m.view, LayerView::default());
+        assert!(m.view.text.visible && m.view.text.opacity == 1.0);
+        assert!(!b.touch_fixed);
     }
 
     #[test]

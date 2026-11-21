@@ -81,6 +81,8 @@ pub(super) fn clean_box_for(b: &Balloon) -> Option<CleanBox> {
         return None;
     }
     let mut c = CleanBox::auto(b.text_box, b.bubble);
+    c.rotation = b.rotation;
+    c.frame = b.frame;
     let shape = match b.shape {
         BubbleShape::Auto => None,
         BubbleShape::Rect => Some(Shape::Rect),
@@ -112,7 +114,10 @@ fn clean_signature(page_idx: usize, page: &at2k::Page) -> u64 {
             b.bubble,
             b.ignore,
             b.hidden,
-            format!("{:?}{:?}{:?}", b.shape, b.fill, b.outline),
+            format!(
+                "{:?}{:?}{:?}{}{:?}",
+                b.shape, b.fill, b.outline, b.rotation, b.frame
+            ),
         )
             .hash(&mut h);
     }
@@ -468,6 +473,7 @@ mod tests {
             sfx: vec![],
             raw_only: false,
             clean: None,
+            paint: None,
         }
     }
 

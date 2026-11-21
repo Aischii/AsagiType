@@ -10,7 +10,12 @@ fn main() -> anyhow::Result<()> {
     let regions = models.analyze(&img, 0.5)?;
     let boxes: Vec<CleanBox> = regions
         .iter()
-        .map(|r| CleanBox::auto(r.text_box, r.bubble))
+        .map(|r| {
+            let mut c = CleanBox::auto(r.text_box, r.bubble);
+            c.rotation = r.rotation;
+            c.frame = r.frame;
+            c
+        })
         .collect();
     let seg = vision::load_segmenter(&PathBuf::from(&a[1]));
     let ts = std::time::Instant::now();
@@ -37,12 +42,14 @@ fn main() -> anyhow::Result<()> {
             .filter(|&(x, y)| res.mask.get_pixel(x as u32, y as u32)[0] > 0)
             .count();
         println!(
-            "{:>2} {:?} touch_up={} box={:?} masked={} {}",
+            "{:>2} {:?} touch_up={} box={:?} masked={} rot={:.1} frame={:?} {}",
             i + 1,
             res.methods[i],
             res.touch_up[i],
             tb,
             masked,
+            r.rotation,
+            r.frame,
             r.source_text
         );
     }

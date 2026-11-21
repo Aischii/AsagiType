@@ -13,7 +13,7 @@ vision.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts"] }
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "clipboard", "links"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 rfd = "0.15"
 dirs = "6"

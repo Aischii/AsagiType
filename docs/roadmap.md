@@ -88,6 +88,20 @@ Decided on 2026-11-20 after the owner tested 0.4. The owner found three problems
 - Layers tab.
 - Healing brush: fill and clone stamp, on the saved paint layer.
 
+Decisions (2026-11-21):
+
+| Topic | Decision |
+| --- | --- |
+| Delivery | Four parts, each tested and tried in the app before a commit: 1) undo and the paint layer format, 2) thumbnails, 3) Layers tab, 4) healing brush |
+| Format | Version 3. `Page.paint` names `paint/<id>.png` (RGBA, page size), written on save when the page has paint. `Manifest.view` holds the Layers tab state. `Balloon.touch_fixed` records a cleared touch-up mark. Orphaned `paint/` and `clean/` entries are dropped on save |
+| Undo | One history per project, 100 steps, in memory only. Ctrl+Z, Ctrl+Y (or Ctrl+Shift+Z) and an Edit menu; undo jumps to the page it changed. A drag or a field edit (click in to click out) is one step. Detect, Translate and Auto runs are one step per page. Paint strokes are steps too |
+| Thumbnails | The source scan, built in the background on open. Tags are computed: Detected, Translated, untranslated count, amber Needs touch-up |
+| Touch-up | Clears when brush strokes cover the marked spot, or with Mark fixed in Properties |
+| Layers tab | Fixed stack: Source, Auto clean, Paint, Text. Eye and opacity per layer, saved in the project, view only: exports always use every layer. Text expands to its balloons (hide, lock) |
+| Healing brush | Fill (J): a translucent red stroke while dragging, filled in the background on release from what you see minus lettering, Smooth or Texture chosen as in the cleaner. Clone stamp (S): Alt+click sets the source, aligned. Round, 2–200 px, `[` and `]`. No eraser: undo covers it |
+| Shortcuts | V select, D draw balloon, J fill, S clone stamp; off while typing |
+| Tilted captions | Fixed during part 1 after a broken clean on a tilted caption strip over dark art. Tilted Auto boxes (1° or more) are cleaned in their own straightened frame: the cleaner finds the strip of paper around the text line, cleans only that strip with its paper colour, and maps the result back. Without a strip it cleans the straightened box |
+
 ### 0.7: export
 
 - JPG and CBZ export of the composited pages.
